@@ -1,99 +1,164 @@
 //! CPU telemetry via Linux k10temp (hwmon) and powercap energy counters.
+//!
+//! Uses time-delta calculation for accurate package power measurement.
 
-use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::fs;
 use std::time::Instant;
 
-/// Previous energy reading for delta calculation.
-static PREV_ENERGY: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
-
-/// CPU temperature and power readings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CpuTelemetry {
-    /// Package temperature Tctl (°C).
-    pub tctl_c: f32,
-    /// CCD1 die temperature (°C), if available.
-    pub ccd1_c: f32,
-    /// CCD2 die temperature (°C), if available.
-    pub ccd2_c: f32,
-    /// Package power via powercap energy delta (W).
-    pub package_power_w: f32,
+/// Helper to track time-delta for CPU package power calculation.
+pub struct CpuMonitor {
+    last_energy_uj: u64,
+    last_time: Instant,
+    k10temp_base_path: Option<std::path::PathBuf>,
+    rapl_path: Option<std::path::PathBuf>,
 }
 
-impl CpuTelemetry {
-    /// Read CPU telemetry from Linux sysfs (k10temp + powercap).
-    ///
-    /// Falls back to zeros on any read error (non-Linux, missing drivers).
-    /// Power is calculated from energy delta over time.
-    pub fn read() -> Self {
-        let tctl_c = Self::read_k10temp("temp1_input");
-        let ccd1_c = Self::read_k10temp("temp3_input");
-        let ccd2_c = Self::read_k10temp("temp4_input");
-        let package_power_w = Self::read_powercap_power_delta();
+impl CpuMonitor {
+    /// Create a new CpuMonitor with discovered paths.
+    pub fn new() -> Self {
+        let k10temp_base_path = Self::discover_k10temp_path();
+        let rapl_path = Self::discover_rapl_path();
+
+        let initial_energy = rapl_path
+            .as_ref()
+            .and_then(|p| Self::read_u64_file(p))
+            .unwrap_or(0);
+
         Self {
-            tctl_c,
-            ccd1_c,
-            ccd2_c,
-            package_power_w,
+            last_energy_uj: initial_energy,
+            last_time: Instant::now(),
+            k10temp_base_path,
+            rapl_path,
         }
     }
 
-    fn read_k10temp(sensor: &str) -> f32 {
-        // Find hwmon path for k10temp
-        let Ok(entries) = std::fs::read_dir("/sys/class/hwmon") else {
-            return 0.0;
+    /// Poll CPU temperature and power.
+    /// Returns (tctl_c, power_w) tuple.
+    pub fn poll(&mut self) -> (f32, f32) {
+        let tctl_c = self.read_tctl();
+        let power_w = self.read_power_delta();
+        (tctl_c, power_w)
+    }
+
+    /// Read Tctl temperature (package temperature).
+    fn read_tctl(&self) -> f32 {
+        if let Some(ref base) = self.k10temp_base_path {
+            let path = base.join("temp1_input");
+            Self::read_milli_celsius(&path)
+        } else {
+            0.0
+        }
+    }
+
+    /// Read CCD1 temperature if available.
+    pub fn read_ccd1(&self) -> f32 {
+        if let Some(ref base) = self.k10temp_base_path {
+            let path = base.join("temp3_input");
+            Self::read_milli_celsius(&path)
+        } else {
+            0.0
+        }
+    }
+
+    /// Read CCD2 temperature if available.
+    pub fn read_ccd2(&self) -> f32 {
+        if let Some(ref base) = self.k10temp_base_path {
+            let path = base.join("temp4_input");
+            Self::read_milli_celsius(&path)
+        } else {
+            0.0
+        }
+    }
+
+    /// Read power from energy counter delta over time.
+    fn read_power_delta(&mut self) -> f32 {
+        let current_energy = self
+            .rapl_path
+            .as_ref()
+            .and_then(|p| Self::read_u64_file(p))
+            .unwrap_or(self.last_energy_uj);
+
+        let now = Instant::now();
+        let elapsed_sec = now.duration_since(self.last_time).as_secs_f32();
+
+        let power_w = if elapsed_sec > 0.0 && current_energy >= self.last_energy_uj {
+            let delta_uj = current_energy - self.last_energy_uj;
+            (delta_uj as f32 / 1_000_000.0) / elapsed_sec
+        } else {
+            0.0
         };
+
+        self.last_energy_uj = current_energy;
+        self.last_time = now;
+
+        power_w.max(0.0)
+    }
+
+    /// Discover k10temp hwmon path by searching /sys/class/hwmon.
+    fn discover_k10temp_path() -> Option<std::path::PathBuf> {
+        let entries = fs::read_dir("/sys/class/hwmon").ok()?;
         for entry in entries.flatten() {
             let name_path = entry.path().join("name");
-            if let Ok(name) = std::fs::read_to_string(&name_path) {
+            if let Ok(name) = fs::read_to_string(&name_path) {
                 if name.trim() == "k10temp" {
-                    let sensor_path = entry.path().join(sensor);
-                    if let Ok(raw) = std::fs::read_to_string(&sensor_path) {
-                        if let Ok(milli_c) = raw.trim().parse::<i64>() {
-                            return milli_c as f32 / 1000.0;
-                        }
-                    }
+                    return Some(entry.path());
                 }
             }
         }
-        0.0
+        None
     }
 
-    /// Read energy counter and calculate power from delta over time.
-    /// Returns power in watts.
-    fn read_powercap_power_delta() -> f32 {
+    /// Discover RAPL energy counter path.
+    fn discover_rapl_path() -> Option<std::path::PathBuf> {
         let paths = [
             "/sys/class/powercap/amd-energy:0/energy_uj",
             "/sys/class/powercap/intel-rapl:0/energy_uj",
             "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
         ];
 
-        let now = Instant::now();
-
         for path in &paths {
-            if let Ok(raw) = std::fs::read_to_string(path) {
-                if let Ok(current_uj) = raw.trim().parse::<u64>() {
-                    let mut guard = PREV_ENERGY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-                    let power_w = if let Some((prev_uj, prev_time)) = *guard {
-                        let delta_uj = current_uj.saturating_sub(prev_uj);
-                        let delta_secs = prev_time.elapsed().as_secs_f64();
-
-                        if delta_secs > 0.0 {
-                            // Convert microjoules to watts (joules per second)
-                            (delta_uj as f64 / delta_secs / 1_000_000.0) as f32
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0 // First reading, no delta available yet
-                    };
-
-                    *guard = Some((current_uj, now));
-                    return power_w.max(0.0); // Clamp negative values (counter wrap)
-                }
+            if std::path::Path::new(path).exists() {
+                return Some(path.into());
             }
         }
-        0.0
+        None
+    }
+
+    /// Read a file containing an integer value.
+    fn read_u64_file(path: &std::path::Path) -> Option<u64> {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    }
+
+    /// Read temperature in millicelsius and convert to celsius.
+    fn read_milli_celsius(path: &std::path::Path) -> f32 {
+        Self::read_u64_file(path)
+            .map(|milli| milli as f32 / 1000.0)
+            .unwrap_or(0.0)
+    }
+}
+
+/// Legacy CpuTelemetry struct for backward compatibility.
+#[derive(Debug, Clone, Default)]
+pub struct CpuTelemetry {
+    pub tctl_c: f32,
+    pub ccd1_c: f32,
+    pub ccd2_c: f32,
+    pub package_power_w: f32,
+}
+
+impl CpuTelemetry {
+    /// Read CPU telemetry using a temporary CpuMonitor.
+    /// Note: For accurate power readings, use CpuMonitor directly in your polling loop.
+    pub fn read() -> Self {
+        let mut monitor = CpuMonitor::new();
+        let (tctl_c, power_w) = monitor.poll();
+        Self {
+            tctl_c,
+            ccd1_c: monitor.read_ccd1(),
+            ccd2_c: monitor.read_ccd2(),
+            package_power_w: power_w,
+        }
     }
 }
