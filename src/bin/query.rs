@@ -26,7 +26,13 @@ fn main() -> Result<()> {
             avg(encoder_util_perc) as avg_enc,
             avg(decoder_util_perc) as avg_dec,
             sum(CASE WHEN mangohud_active THEN 1 ELSE 0 END) * 100.0 / count(*) as mangohud_presence_pct,
-            count(*) as sample_count
+            count(*) as sample_count,
+            avg(cpu_tctl_c) as avg_cpu_temp,
+            max(cpu_tctl_c) as max_cpu_temp,
+            avg(cpu_ccd1_c) as avg_cpu_ccd1,
+            max(cpu_ccd1_c) as max_cpu_ccd1,
+            avg(cpu_ccd2_c) as avg_cpu_ccd2,
+            max(cpu_ccd2_c) as max_cpu_ccd2
          FROM read_parquet('{}')", 
         parquet_file
     ))?;
@@ -42,6 +48,12 @@ fn main() -> Result<()> {
         let avg_dec: f64 = row.get(6)?;
         let mangohud_pct: f64 = row.get(7)?;
         let count: i64 = row.get(8)?;
+        let avg_cpu_temp: f64 = row.get(9)?;
+        let max_cpu_temp: f64 = row.get(10)?;
+        let avg_cpu_ccd1: f64 = row.get(11)?;
+        let max_cpu_ccd1: f64 = row.get(12)?;
+        let avg_cpu_ccd2: f64 = row.get(13)?;
+        let max_cpu_ccd2: f64 = row.get(14)?;
 
         println!("Samples: {}", count);
         println!("Avg Power: {:.2} W", avg_power / 1000.0);
@@ -52,6 +64,13 @@ fn main() -> Result<()> {
         println!("Avg Encoder: {:.1}%", avg_enc);
         println!("Avg Decoder: {:.1}%", avg_dec);
         println!("MangoHud Active: {:.1}% of samples", mangohud_pct);
+        println!("\n--- CPU Telemetry ---");
+        println!("Avg CPU Temp (Tctl): {:.1} C", avg_cpu_temp);
+        println!("Max CPU Temp (Tctl): {:.1} C", max_cpu_temp);
+        println!("Avg CCD1 Temp: {:.1} C", avg_cpu_ccd1);
+        println!("Max CCD1 Temp: {:.1} C", max_cpu_ccd1);
+        println!("Avg CCD2 Temp: {:.1} C", avg_cpu_ccd2);
+        println!("Max CCD2 Temp: {:.1} C", max_cpu_ccd2);
     }
 
     // Detecting "Inhibitory" Signals (Throttling)
@@ -92,6 +111,33 @@ fn main() -> Result<()> {
         let rx: u32 = row.get(1)?;
         let pwr: u32 = row.get(2)?;
         println!("TS: {} | PCIe RX: {:6} KB/s | Power: {:5} mW", ts, rx, pwr);
+    }
+
+    // CPU Temperature Spikes
+    println!("\n[CPU Temperature Spikes (Tctl > 80C)]");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT timestamp_ms, cpu_tctl_c, cpu_ccd1_c, cpu_ccd2_c, power_usage_mw
+         FROM read_parquet('{}') 
+         WHERE cpu_tctl_c > 80.0
+         ORDER BY cpu_tctl_c DESC 
+         LIMIT 5", 
+        parquet_file
+    ))?;
+
+    let mut rows = stmt.query([])?;
+    let mut found = false;
+    while let Some(row) = rows.next()? {
+        found = true;
+        let ts: i64 = row.get(0)?;
+        let tctl: f32 = row.get(1)?;
+        let ccd1: f32 = row.get(2)?;
+        let ccd2: f32 = row.get(3)?;
+        let pwr: u32 = row.get(4)?;
+        println!("TS: {} | Tctl: {:5.1} C | CCD1: {:5.1} C | CCD2: {:5.1} C | Power: {:5} mW", 
+                 ts, tctl, ccd1, ccd2, pwr);
+    }
+    if !found {
+        println!("No CPU thermal spikes detected.");
     }
 
     Ok(())

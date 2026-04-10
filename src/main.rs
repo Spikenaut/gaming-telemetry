@@ -1,3 +1,5 @@
+mod cpu;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
@@ -7,6 +9,7 @@ use std::fs::File;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use std::process::Command;
+use cpu::CpuTelemetry;
 
 #[derive(Debug, Clone)]
 struct GpuSample {
@@ -25,6 +28,11 @@ struct GpuSample {
     encoder_util_perc: u32,
     decoder_util_perc: u32,
     mangohud_active: bool,
+    // CPU telemetry
+    cpu_tctl_c: f32,
+    cpu_ccd1_c: f32,
+    cpu_ccd2_c: f32,
+    cpu_package_power_w: f32,
 }
 
 const BUFFER_SIZE: usize = 2000; // ~10 seconds of data at default 5ms intervals
@@ -45,6 +53,10 @@ async fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> 
     let enc_util: Vec<u32> = samples.iter().map(|s| s.encoder_util_perc).collect();
     let dec_util: Vec<u32> = samples.iter().map(|s| s.decoder_util_perc).collect();
     let mangohud: Vec<bool> = samples.iter().map(|s| s.mangohud_active).collect();
+    let cpu_tctl: Vec<f32> = samples.iter().map(|s| s.cpu_tctl_c).collect();
+    let cpu_ccd1: Vec<f32> = samples.iter().map(|s| s.cpu_ccd1_c).collect();
+    let cpu_ccd2: Vec<f32> = samples.iter().map(|s| s.cpu_ccd2_c).collect();
+    let cpu_power: Vec<f32> = samples.iter().map(|s| s.cpu_package_power_w).collect();
 
     let mut df = df!(
         "timestamp_ms" => timestamps,
@@ -62,6 +74,10 @@ async fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> 
         "encoder_util_perc" => enc_util,
         "decoder_util_perc" => dec_util,
         "mangohud_active" => mangohud,
+        "cpu_tctl_c" => cpu_tctl,
+        "cpu_ccd1_c" => cpu_ccd1,
+        "cpu_ccd2_c" => cpu_ccd2,
+        "cpu_package_power_w" => cpu_power,
     )?;
 
     let filename = format!("gpu_telemetry_batch_{}.parquet", batch_id);
@@ -120,7 +136,10 @@ async fn main() -> Result<()> {
                 
                 // MangoHud integration
                 let mangohud_active = is_mangohud_running();
-                
+
+                // CPU telemetry
+                let cpu_telemetry = CpuTelemetry::read();
+
                 let sample = GpuSample {
                     timestamp: Utc::now(),
                     power_usage_mw: power_usage,
@@ -137,6 +156,10 @@ async fn main() -> Result<()> {
                     encoder_util_perc: encoder_util,
                     decoder_util_perc: decoder_util,
                     mangohud_active,
+                    cpu_tctl_c: cpu_telemetry.tctl_c,
+                    cpu_ccd1_c: cpu_telemetry.ccd1_c,
+                    cpu_ccd2_c: cpu_telemetry.ccd2_c,
+                    cpu_package_power_w: cpu_telemetry.package_power_w,
                 };
 
                 buffer.push(sample);
