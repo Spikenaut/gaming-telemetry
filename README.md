@@ -7,7 +7,7 @@ The collector identifies "excitatory" spikes (e.g., PCIe bus floods during asset
 
 ## Key Features
 - **Ultra-Low Latency Polling**: Captures metrics at **5-millisecond intervals** using the NVIDIA Management Library (NVML).
-- **Asynchronous I/O**: To prevent performance drops during heavy gaming (Path Tracing), data is buffered in memory and written to **Parquet** files asynchronously using `tokio` and `polars`.
+- **Asynchronous I/O**: To prevent performance drops during heavy gaming (Path Tracing), data is buffered in memory and written to versioned **Parquet** files (`gpu_telemetry_v1_batch_N.parquet`) asynchronously using `tokio` and `polars`.
 - **DuckDB Integration**: Includes a built-in query utility for instant analysis of the captured Parquet batches.
 - **Rich Metric Suite**: Captures complex hardware states beyond simple temperature and power.
 
@@ -31,14 +31,41 @@ The telemetry captures a blend of fast-moving transients and slow-moving momentu
 ### 1. Start the Telemetry Daemon
 Run the daemon in release mode to ensure minimal overhead and maximum timing accuracy.
 ```bash
-cargo run --release
+cargo run --release --bin gaming-telemetry
 ```
-The daemon will continuously poll the GPU and save data into `gpu_telemetry_batch_N.parquet` files once the memory buffer fills.
+The daemon continuously polls telemetry and writes versioned batches as:
 
-### 2. Analyze Data with DuckDB
-Use the provided query utility to analyze a specific batch. This tool identifies significant hardware events like excitatory spikes and inhibitory throttling.
+`gpu_telemetry_v1_batch_N.parquet`
+
+CPU package power is recorded from the `CpuMonitor` time-delta energy-counter path.
+
+### 2. Export Canonical CSV for `corinth-canal`
+Convert one v1 Parquet batch into the stable 5-column replay schema:
 ```bash
-cargo run --bin query gpu_telemetry_batch_1.parquet
+cargo run --bin export_csv gpu_telemetry_v1_batch_1.parquet canonical.csv
+```
+
+Canonical CSV header (exact order):
+
+`timestamp_ms,gpu_temp_c,gpu_power_w,cpu_tctl_c,cpu_package_power_w`
+
+`gpu_power_w` is exported as `power_usage_mw / 1000.0`. CPU columns come from recorded parquet columns.
+
+### 3. Optional: Analyze Data with DuckDB
+Use the query utility for ad-hoc analysis:
+```bash
+cargo run --bin query gpu_telemetry_v1_batch_1.parquet
+```
+
+## Replay Contract
+
+One-way flow:
+
+`collector -> gpu_telemetry_v1_batch_N.parquet -> export_csv -> canonical.csv -> corinth-canal/examples/csv_replay`
+
+Consumer command in `corinth-canal`:
+```bash
+cargo run --example csv_replay canonical.csv
 ```
 
 ## Architecture for SNNs
