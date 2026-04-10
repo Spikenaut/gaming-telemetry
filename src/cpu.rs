@@ -1,6 +1,11 @@
 //! CPU telemetry via Linux k10temp (hwmon) and powercap energy counters.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Previous energy reading for delta calculation.
+static PREV_ENERGY: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
 
 /// CPU temperature and power readings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -19,11 +24,12 @@ impl CpuTelemetry {
     /// Read CPU telemetry from Linux sysfs (k10temp + powercap).
     ///
     /// Falls back to zeros on any read error (non-Linux, missing drivers).
+    /// Power is calculated from energy delta over time.
     pub fn read() -> Self {
         let tctl_c = Self::read_k10temp("temp1_input");
         let ccd1_c = Self::read_k10temp("temp3_input");
         let ccd2_c = Self::read_k10temp("temp4_input");
-        let package_power_w = Self::read_powercap_power();
+        let package_power_w = Self::read_powercap_power_delta();
         Self {
             tctl_c,
             ccd1_c,
@@ -53,18 +59,38 @@ impl CpuTelemetry {
         0.0
     }
 
-    fn read_powercap_power() -> f32 {
-        // Read AMD RAPL energy from powercap (microjoules)
+    /// Read energy counter and calculate power from delta over time.
+    /// Returns power in watts.
+    fn read_powercap_power_delta() -> f32 {
         let paths = [
             "/sys/class/powercap/amd-energy:0/energy_uj",
             "/sys/class/powercap/intel-rapl:0/energy_uj",
+            "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
         ];
+
+        let now = Instant::now();
+
         for path in &paths {
             if let Ok(raw) = std::fs::read_to_string(path) {
-                if let Ok(_uj) = raw.trim().parse::<u64>() {
-                    // Would need delta measurement over time for true power
-                    // Return 0 — caller should use time-delta approach
-                    return 0.0;
+                if let Ok(current_uj) = raw.trim().parse::<u64>() {
+                    let mut guard = PREV_ENERGY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                    let power_w = if let Some((prev_uj, prev_time)) = *guard {
+                        let delta_uj = current_uj.saturating_sub(prev_uj);
+                        let delta_secs = prev_time.elapsed().as_secs_f64();
+
+                        if delta_secs > 0.0 {
+                            // Convert microjoules to watts (joules per second)
+                            (delta_uj as f64 / delta_secs / 1_000_000.0) as f32
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0 // First reading, no delta available yet
+                    };
+
+                    *guard = Some((current_uj, now));
+                    return power_w.max(0.0); // Clamp negative values (counter wrap)
                 }
             }
         }

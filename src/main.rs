@@ -80,7 +80,7 @@ async fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> 
         "cpu_package_power_w" => cpu_power,
     )?;
 
-    let filename = format!("gpu_telemetry_batch_{}.parquet", batch_id);
+    let filename = format!("gpu_telemetry_v1_batch_{}.parquet", batch_id);
     let file = File::create(&filename)?;
     ParquetWriter::new(file).finish(&mut df)?;
     
