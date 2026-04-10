@@ -9,7 +9,7 @@ use std::fs::File;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use std::process::Command;
-use cpu::CpuTelemetry;
+use cpu::CpuMonitor;
 
 #[derive(Debug, Clone)]
 struct GpuSample {
@@ -111,6 +111,7 @@ async fn main() -> Result<()> {
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
     let mut batch_counter = 0;
+    let mut cpu_monitor = CpuMonitor::new();
 
     println!("Starting enhanced GPU telemetry polling every {}ms...", poll_interval_ms);
     println!("Press Ctrl+C to stop gracefully.");
@@ -137,8 +138,10 @@ async fn main() -> Result<()> {
                 // MangoHud integration
                 let mangohud_active = is_mangohud_running();
 
-                // CPU telemetry
-                let cpu_telemetry = CpuTelemetry::read();
+                // CPU telemetry (poll for time-delta power calculation)
+                let (cpu_tctl_c, cpu_package_power_w) = cpu_monitor.poll();
+                let cpu_ccd1_c = cpu_monitor.read_ccd1();
+                let cpu_ccd2_c = cpu_monitor.read_ccd2();
 
                 let sample = GpuSample {
                     timestamp: Utc::now(),
@@ -156,10 +159,10 @@ async fn main() -> Result<()> {
                     encoder_util_perc: encoder_util,
                     decoder_util_perc: decoder_util,
                     mangohud_active,
-                    cpu_tctl_c: cpu_telemetry.tctl_c,
-                    cpu_ccd1_c: cpu_telemetry.ccd1_c,
-                    cpu_ccd2_c: cpu_telemetry.ccd2_c,
-                    cpu_package_power_w: cpu_telemetry.package_power_w,
+                    cpu_tctl_c,
+                    cpu_ccd1_c,
+                    cpu_ccd2_c,
+                    cpu_package_power_w,
                 };
 
                 buffer.push(sample);
