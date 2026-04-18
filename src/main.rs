@@ -80,7 +80,7 @@ async fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> 
         "cpu_package_power_w" => cpu_power,
     )?;
 
-    let filename = format!("gpu_telemetry_v1_batch_{}.parquet", batch_id);
+    let filename = format!("system_telemetry_v1_batch_{}.parquet", batch_id);
     let file = File::create(&filename)?;
     ParquetWriter::new(file).finish(&mut df)?;
     
@@ -115,6 +115,10 @@ async fn main() -> Result<()> {
 
     println!("Starting enhanced GPU telemetry polling every {}ms...", poll_interval_ms);
     println!("Press Ctrl+C to stop gracefully.");
+
+    // Setup signal handlers for graceful shutdown (SIGINT = Ctrl+C, SIGTERM = kill)
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     loop {
         tokio::select! {
@@ -179,8 +183,19 @@ async fn main() -> Result<()> {
                     });
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                println!("\nShutdown signal received. Finalizing last batch...");
+            _ = sigint.recv() => {
+                println!("\nCtrl+C received. Finalizing last batch...");
+                if !buffer.is_empty() {
+                    batch_counter += 1;
+                    if let Err(e) = write_to_parquet(buffer, batch_counter).await {
+                        eprintln!("Failed to write final batch: {:?}", e);
+                    }
+                }
+                println!("Graceful shutdown complete.");
+                break;
+            }
+            _ = sigterm.recv() => {
+                println!("\nSIGTERM received. Finalizing last batch...");
                 if !buffer.is_empty() {
                     batch_counter += 1;
                     if let Err(e) = write_to_parquet(buffer, batch_counter).await {
