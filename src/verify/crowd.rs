@@ -1,12 +1,12 @@
 use regex::Regex;
 
-use crate::verify::VerifyError;
 use crate::verify::discovery::DiscoveryContext;
 use crate::verify::fs::read_to_string;
 use crate::verify::types::{
     ClaimVerdict, ConfigSection, CrowdProfileSection, CrowdSettings, ModState, ModsSection,
     SettingsSource,
 };
+use crate::verify::VerifyError;
 
 pub fn crowd_profile_audit(
     ctx: &DiscoveryContext,
@@ -50,14 +50,18 @@ pub fn crowd_profile_audit(
     } else {
         let variables =
             game_root.join("bin/x64/plugins/cyber_engine_tweaks/mods/UltraPlus/lib/Variables.lua");
-        let content = read_to_string(&variables).map_err(|err| {
-            VerifyError::Input(format!("failed to read {}: {err}", variables.display()))
-        })?;
-        (
-            SettingsSource::Defaults,
-            parse_lua_default_crowds(&content),
-            "unknown/default".to_string(),
-        )
+        if variables.exists() {
+            let content = read_to_string(&variables).map_err(|err| {
+                VerifyError::Input(format!("failed to read {}: {err}", variables.display()))
+            })?;
+            (
+                SettingsSource::Defaults,
+                parse_lua_default_crowds(&content),
+                "unknown/default".to_string(),
+            )
+        } else {
+            (SettingsSource::Unknown, None, "unknown/default".to_string())
+        }
     };
 
     let base_density = config

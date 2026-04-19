@@ -200,12 +200,13 @@
     },
     "runtimeThresholds": {
       "type": "object",
-      "required": ["avg_gpu_w", "max_gpu_w", "max_vram_mb", "max_pcie_rx_mb_s"],
+      "required": ["avg_gpu_w", "max_gpu_w", "max_vram_mb", "max_pcie_rx_mb_s", "avg_cpu_w"],
       "properties": {
         "avg_gpu_w": { "type": "number" },
         "max_gpu_w": { "type": "number" },
         "max_vram_mb": { "type": "number" },
-        "max_pcie_rx_mb_s": { "type": "number" }
+        "max_pcie_rx_mb_s": { "type": "number" },
+        "avg_cpu_w": { "type": "number" }
       }
     },
     "runtimeMetrics": {
@@ -217,7 +218,9 @@
         "avg_vram_mb": { "type": "number" },
         "max_vram_mb": { "type": "number" },
         "avg_pcie_rx_mb_s": { "type": "number" },
-        "max_pcie_rx_mb_s": { "type": "number" }
+        "max_pcie_rx_mb_s": { "type": "number" },
+        "avg_cpu_w": { "type": "number" },
+        "max_cpu_w": { "type": "number" }
       }
     }
   }

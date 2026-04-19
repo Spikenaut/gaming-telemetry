@@ -128,6 +128,28 @@ fn runtime_parse_error_returns_exit_3() {
     assert_eq!(output.status.code(), Some(3));
 }
 
+#[test]
+fn missing_ultraplus_variables_is_not_hard_error() {
+    let user_settings =
+        fs::read_to_string(fixture("tests/fixtures/proton/UserSettings.json")).unwrap();
+    let home = prepare_home("tests/fixtures/mods/broken", &user_settings);
+    let variables = home.path().join(
+        ".local/share/Steam/steamapps/common/Cyberpunk 2077/bin/x64/plugins/cyber_engine_tweaks/mods/UltraPlus/lib/Variables.lua",
+    );
+    if variables.exists() {
+        fs::remove_file(&variables).unwrap();
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_verify_cyberpunk"))
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["crowd_profile"]["settings_source"], "unknown");
+}
+
 #[cfg(unix)]
 #[test]
 fn unreadable_config_returns_exit_2() {

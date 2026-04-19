@@ -71,6 +71,7 @@ Search order:
 
 Exit codes:
 - `0`: verifier completed with `pass` or `warning`
+- `1`: verifier completed with `error`
 - `2`: usage, discovery, or unreadable input/config error
 - `3`: runtime telemetry parse error
 
@@ -86,7 +87,7 @@ cargo run --bin verify_cyberpunk -- --format text
 ```bash
 cargo run --bin verify_cyberpunk -- \
   --telemetry tests/fixtures/runtime/pass.csv \
-  --runtime-thresholds '{"avg_gpu_w":210,"max_gpu_w":290,"max_vram_mb":12000,"max_pcie_rx_mb_s":900}'
+  --runtime-thresholds '{"avg_gpu_w":210,"max_gpu_w":290,"max_vram_mb":12000,"max_pcie_rx_mb_s":900,"avg_cpu_w":100}'
 ```
 
 The verifier never modifies game files. `--dry-run` enforces stdout-only output and keeps the command strictly read-only.

@@ -142,7 +142,82 @@ pub fn success_exit_code(sidecar: &Sidecar) -> i32 {
         .is_some()
     {
         3
+    } else if sidecar.overall_status == OverallStatus::Error {
+        1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::verify::types::*;
+
+    fn minimal_sidecar(overall_status: OverallStatus) -> Sidecar {
+        Sidecar {
+            schema_version: "1.0.0".to_string(),
+            generated_at: "2026-04-19T00:00:00Z".to_string(),
+            workload_profile: "cp2077_modded_ultraplus_pt_dlss4_hdtextures_highcrowd".to_string(),
+            game: GameSection {
+                search_paths: vec![],
+                selected_game_root: None,
+                selected_manifest: None,
+                selected_proton_prefix: None,
+            },
+            install: InstallSection {
+                install_root: None,
+                steam_buildid: None,
+                last_updated: None,
+                last_played: None,
+                manifest: None,
+                required_binaries: BTreeMap::new(),
+            },
+            config: ConfigSection {
+                config_source: None,
+                config_confidence: None,
+                config_file: None,
+                values: BTreeMap::new(),
+            },
+            mods: ModsSection {
+                artifacts: BTreeMap::new(),
+            },
+            crowd_profile: CrowdProfileSection {
+                base_crowd_density: None,
+                high_crowd_profile: ClaimVerdict::Fail,
+                settings_source: SettingsSource::Unknown,
+                ultra_plus_crowds_enabled: None,
+                ultra_plus_mode: None,
+                nova_crowds: None,
+            },
+            path_tracing: PathTracingSection {
+                ray_tracing: None,
+                ray_traced_path_tracing: None,
+                ray_traced_path_tracing_for_photo_mode: None,
+                ultra_plus_mode: "unknown/default".to_string(),
+                verdict: ClaimVerdict::Fail,
+            },
+            dlss: DlssSection {
+                resolution_scaling: None,
+                dlss_backend_preset: None,
+                dlss: None,
+                dlss_d: None,
+                dlss_frame_gen: None,
+                dlss_multi_frame_generation: None,
+                dlss_4_download_verified: ClaimVerdict::Fail,
+                dlss_transformer_selected: ClaimVerdict::Fail,
+                dlss_upscaling_enabled: ClaimVerdict::Fail,
+            },
+            runtime: None,
+            verdict: BTreeMap::new(),
+            overall_status,
+            error_details: vec![],
+        }
+    }
+
+    #[test]
+    fn returns_one_when_overall_status_is_error() {
+        let sidecar = minimal_sidecar(OverallStatus::Error);
+        assert_eq!(success_exit_code(&sidecar), 1);
     }
 }

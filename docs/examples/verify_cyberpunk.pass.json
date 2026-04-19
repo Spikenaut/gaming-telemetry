@@ -22,15 +22,15 @@
     "last_played": "1775691532",
     "manifest": null,
     "required_binaries": {
-      "nvngx_dlss.dll": { "file": null, "verdict": "pass" },
-      "nvngx_dlssd.dll": { "file": null, "verdict": "pass" },
-      "nvngx_dlssg.dll": { "file": null, "verdict": "pass" },
-      "sl.common.dll": { "file": null, "verdict": "pass" },
-      "sl.dlss.dll": { "file": null, "verdict": "pass" },
-      "sl.dlss_d.dll": { "file": null, "verdict": "pass" },
-      "sl.dlss_g.dll": { "file": null, "verdict": "pass" },
-      "sl.interposer.dll": { "file": null, "verdict": "pass" },
-      "sl.reflex.dll": { "file": null, "verdict": "pass" }
+      "nvngx_dlss.dll": { "verdict": "pass" },
+      "nvngx_dlssd.dll": { "verdict": "pass" },
+      "nvngx_dlssg.dll": { "verdict": "pass" },
+      "sl.common.dll": { "verdict": "pass" },
+      "sl.dlss.dll": { "verdict": "pass" },
+      "sl.dlss_d.dll": { "verdict": "pass" },
+      "sl.dlss_g.dll": { "verdict": "pass" },
+      "sl.interposer.dll": { "verdict": "pass" },
+      "sl.reflex.dll": { "verdict": "pass" }
     }
   },
   "config": {
@@ -49,9 +49,12 @@
   },
   "mods": {
     "artifacts": {
-      "ultra_plus_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "cet_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "dlss_enabler_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "fake_pt_light_fix_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
       "hd_textures_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
-      "nova_crowds_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] }
+      "nova_crowds_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "ultra_plus_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] }
     }
   },
   "crowd_profile": {
@@ -87,31 +90,40 @@
   "runtime": {
     "telemetry_path": "tests/fixtures/runtime/pass.csv",
     "file_type": "csv",
-    "thresholds": {
-      "avg_gpu_w": 200.0,
-      "max_gpu_w": 280.0,
-      "max_vram_mb": 10000.0,
-      "max_pcie_rx_mb_s": 1000.0
-    },
-    "metrics": {
-      "avg_gpu_w": 295.8,
-      "max_gpu_w": 310.0,
-      "avg_vram_mb": 14308.0,
-      "max_vram_mb": 14500.0,
-      "avg_pcie_rx_mb_s": 1166.0,
-      "max_pcie_rx_mb_s": 1300.0
-    },
+      "thresholds": {
+        "avg_gpu_w": 200.0,
+        "max_gpu_w": 280.0,
+        "max_vram_mb": 10000.0,
+        "max_pcie_rx_mb_s": 1000.0,
+        "avg_cpu_w": 80.0
+      },
+      "metrics": {
+        "avg_gpu_w": 295.8,
+        "max_gpu_w": 310.0,
+        "avg_vram_mb": 14308.0,
+        "max_vram_mb": 14500.0,
+        "avg_pcie_rx_mb_s": 1166.0,
+        "max_pcie_rx_mb_s": 1300.0,
+        "avg_cpu_w": 158.2,
+        "max_cpu_w": 168.0
+      },
     "runtime_parse_error": null,
     "runtime_corroboration": "pass"
   },
-  "verdict": {
-    "dlss_4_download_verified": "pass",
-    "dlss_transformer_selected": "pass",
-    "dlss_upscaling_enabled": "pass",
-    "path_tracing_enabled": "pass",
-    "high_crowd_profile": "pass",
-    "runtime_corroboration": "pass"
-  },
+    "verdict": {
+      "dlss_4_download_verified": "pass",
+      "dlss_transformer_selected": "pass",
+      "dlss_upscaling_enabled": "pass",
+      "path_tracing_enabled": "pass",
+      "high_crowd_profile": "pass",
+      "cet_active": "pass",
+      "dlss_enabler_active": "pass",
+      "fake_pt_light_fix_active": "pass",
+      "hd_textures_active": "pass",
+      "nova_crowds_active": "pass",
+      "ultra_plus_active": "pass",
+      "runtime_corroboration": "pass"
+    },
   "overall_status": "pass",
   "error_details": []
 }

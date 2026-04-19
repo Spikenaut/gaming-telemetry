@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::verify::VerifyError;
 use crate::verify::discovery::DiscoveryContext;
 use crate::verify::fs::{canonical_is_within, dir_has_regular_files, evidence};
 use crate::verify::types::{ClaimVerdict, ModArtifact, ModState, ModsSection};
+use crate::verify::VerifyError;
 
 struct ArtifactRule {
     name: &'static str,
@@ -72,6 +72,19 @@ pub fn mods_audit(ctx: &DiscoveryContext, debug: bool) -> Result<ModsSection, Ve
         .ok_or_else(|| VerifyError::Input("game root not discovered".to_string()))?;
     let mut artifacts = BTreeMap::new();
     let backup_root = crate::verify::fs::expand_home("~/mod-backups");
+    let mut backup_index: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    if backup_root.exists() {
+        for entry in walkdir::WalkDir::new(&backup_root)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            backup_index
+                .entry(name)
+                .or_default()
+                .push(entry.path().to_path_buf());
+        }
+    }
 
     for artifact in ARTIFACTS {
         let mut evidence_list = Vec::new();
@@ -101,21 +114,17 @@ pub fn mods_audit(ctx: &DiscoveryContext, debug: bool) -> Result<ModsSection, Ve
             }
         }
 
-        if backup_root.exists() {
-            for relative in artifact.live_paths {
-                let name = Path::new(relative)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    continue;
-                }
-                for entry in walkdir::WalkDir::new(&backup_root)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_name().to_string_lossy() == name)
-                {
-                    forensic.push(evidence(entry.path(), "backup"));
+        for relative in artifact.live_paths {
+            let name = Path::new(relative)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(paths) = backup_index.get(&name) {
+                for path in paths {
+                    forensic.push(evidence(path, "backup"));
                 }
             }
         }
@@ -132,10 +141,12 @@ pub fn mods_audit(ctx: &DiscoveryContext, debug: bool) -> Result<ModsSection, Ve
 
         let state = if live_hits == artifact.live_paths.len() {
             ModState::ActiveInstalled
-        } else if live_hits > 0 || !forensic.is_empty() {
+        } else if live_hits > 0 {
             ModState::PartiallyInstalledBroken
         } else if downloaded_only.is_some() {
             ModState::DownloadedOnly
+        } else if !forensic.is_empty() {
+            ModState::PartiallyInstalledBroken
         } else {
             ModState::Missing
         };
@@ -203,6 +214,35 @@ mod tests {
         assert_eq!(
             mods.artifacts["cet_active"].state,
             ModState::PartiallyInstalledBroken
+        );
+    }
+
+    #[test]
+    fn download_marker_only_is_downloaded_only_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        let game_root = home.join(".local/share/Steam/steamapps/common/Cyberpunk 2077");
+        std::fs::create_dir_all(&game_root).unwrap();
+        std::fs::write(
+            game_root.join("DLSS Enabler 4.6.0 STABLE-757-4-6-0-1776280563.zip"),
+            b"download",
+        )
+        .unwrap();
+
+        let ctx = DiscoveryContext {
+            search_paths: vec![],
+            game_root: Some(game_root),
+            manifest: None,
+            proton_prefix: None,
+            source_label: Some("test".to_string()),
+        };
+        let mods = mods_audit(&ctx, false).unwrap();
+        assert_eq!(
+            mods.artifacts["dlss_enabler_active"].state,
+            ModState::DownloadedOnly
         );
     }
 }
