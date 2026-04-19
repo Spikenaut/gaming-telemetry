@@ -1,0 +1,37 @@
+{
+  "data": [
+    {
+      "group_name": "/graphics/presets",
+      "options": [
+        { "name": "ResolutionScaling", "value": "FSR2" },
+        { "name": "DLSS", "value": "Auto" },
+        { "name": "DLSS_BackendPreset", "value": "Transformer" },
+        { "name": "DLSS_D", "value": false },
+        { "name": "FrameGeneration", "value": "Off" },
+        { "name": "DLSS_MultiFrameGeneration", "value": "x2" },
+        { "name": "DLSSFrameGen", "value": false }
+      ]
+    },
+    {
+      "group_name": "/graphics/raytracing",
+      "options": [
+        { "name": "RayTracing", "value": true },
+        { "name": "RayTracedPathTracing", "value": false },
+        { "name": "RayTracedPathTracingForPhotoMode", "value": false },
+        { "name": "RayTracedLighting", "value": "Ultra" }
+      ]
+    },
+    {
+      "group_name": "/video/display",
+      "options": [
+        { "name": "ReflexMode", "value": "Disabled" }
+      ]
+    },
+    {
+      "group_name": "/graphics/performance",
+      "options": [
+        { "name": "CrowdDensity", "value": "High" }
+      ]
+    }
+  ]
+}

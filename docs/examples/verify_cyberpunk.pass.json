@@ -1,0 +1,117 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-04-18T20:00:00Z",
+  "workload_profile": "cp2077_modded_ultraplus_pt_dlss4_hdtextures_highcrowd",
+  "game": {
+    "search_paths": [],
+    "selected_game_root": {
+      "path": "/home/example/.local/share/Steam/steamapps/common/Cyberpunk 2077",
+      "source_label": "steam_local",
+      "size_bytes": 0,
+      "mtime": "2026-04-18T20:00:00Z",
+      "readable": true,
+      "is_symlink": false
+    },
+    "selected_manifest": null,
+    "selected_proton_prefix": null
+  },
+  "install": {
+    "install_root": "/home/example/.local/share/Steam/steamapps/common/Cyberpunk 2077",
+    "steam_buildid": "20383525",
+    "last_updated": "1775627166",
+    "last_played": "1775691532",
+    "manifest": null,
+    "required_binaries": {
+      "nvngx_dlss.dll": { "file": null, "verdict": "pass" },
+      "nvngx_dlssd.dll": { "file": null, "verdict": "pass" },
+      "nvngx_dlssg.dll": { "file": null, "verdict": "pass" },
+      "sl.common.dll": { "file": null, "verdict": "pass" },
+      "sl.dlss.dll": { "file": null, "verdict": "pass" },
+      "sl.dlss_d.dll": { "file": null, "verdict": "pass" },
+      "sl.dlss_g.dll": { "file": null, "verdict": "pass" },
+      "sl.interposer.dll": { "file": null, "verdict": "pass" },
+      "sl.reflex.dll": { "file": null, "verdict": "pass" }
+    }
+  },
+  "config": {
+    "config_source": "/home/example/.../UserSettings.json",
+    "config_confidence": "high",
+    "config_file": null,
+    "values": {
+      "ResolutionScaling": "DLSS",
+      "DLSS_BackendPreset": "Transformer",
+      "DLSS_D": true,
+      "DLSSFrameGen": true,
+      "RayTracing": true,
+      "RayTracedPathTracing": true,
+      "/graphics/performance CrowdDensity": "High"
+    }
+  },
+  "mods": {
+    "artifacts": {
+      "ultra_plus_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "hd_textures_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "nova_crowds_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] }
+    }
+  },
+  "crowd_profile": {
+    "base_crowd_density": "High",
+    "high_crowd_profile": "pass",
+    "settings_source": "defaults",
+    "ultra_plus_crowds_enabled": true,
+    "ultra_plus_mode": "unknown/default",
+    "nova_crowds": {
+      "multiplier": 1,
+      "shuffle_amount": 2,
+      "disable_lq_crowds": false
+    }
+  },
+  "path_tracing": {
+    "ray_tracing": true,
+    "ray_traced_path_tracing": true,
+    "ray_traced_path_tracing_for_photo_mode": false,
+    "ultra_plus_mode": "unknown/default",
+    "verdict": "pass"
+  },
+  "dlss": {
+    "resolution_scaling": "DLSS",
+    "dlss_backend_preset": "Transformer",
+    "dlss": "Auto",
+    "dlss_d": true,
+    "dlss_frame_gen": true,
+    "dlss_multi_frame_generation": "x2",
+    "dlss_4_download_verified": "pass",
+    "dlss_transformer_selected": "pass",
+    "dlss_upscaling_enabled": "pass"
+  },
+  "runtime": {
+    "telemetry_path": "tests/fixtures/runtime/pass.csv",
+    "file_type": "csv",
+    "thresholds": {
+      "avg_gpu_w": 200.0,
+      "max_gpu_w": 280.0,
+      "max_vram_mb": 10000.0,
+      "max_pcie_rx_mb_s": 1000.0
+    },
+    "metrics": {
+      "avg_gpu_w": 295.8,
+      "max_gpu_w": 310.0,
+      "avg_vram_mb": 14308.0,
+      "max_vram_mb": 14500.0,
+      "avg_pcie_rx_mb_s": 1166.0,
+      "max_pcie_rx_mb_s": 1300.0
+    },
+    "runtime_parse_error": null,
+    "runtime_corroboration": "pass"
+  },
+  "verdict": {
+    "dlss_4_download_verified": "pass",
+    "dlss_transformer_selected": "pass",
+    "dlss_upscaling_enabled": "pass",
+    "path_tracing_enabled": "pass",
+    "high_crowd_profile": "pass",
+    "runtime_corroboration": "pass"
+  },
+  "overall_status": "pass",
+  "error_details": []
+}

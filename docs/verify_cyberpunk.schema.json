@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/verify_cyberpunk.schema.json",
+  "title": "verify_cyberpunk sidecar",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "workload_profile",
+    "game",
+    "install",
+    "config",
+    "mods",
+    "crowd_profile",
+    "path_tracing",
+    "dlss",
+    "verdict",
+    "overall_status",
+    "error_details"
+  ],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "workload_profile": {
+      "type": "string",
+      "const": "cp2077_modded_ultraplus_pt_dlss4_hdtextures_highcrowd"
+    },
+    "game": {
+      "type": "object",
+      "properties": {
+        "search_paths": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fileEvidence" }
+        },
+        "selected_game_root": { "anyOf": [{ "$ref": "#/$defs/fileEvidence" }, { "type": "null" }] },
+        "selected_manifest": { "anyOf": [{ "$ref": "#/$defs/fileEvidence" }, { "type": "null" }] },
+        "selected_proton_prefix": { "anyOf": [{ "$ref": "#/$defs/fileEvidence" }, { "type": "null" }] }
+      },
+      "required": ["search_paths"]
+    },
+    "install": {
+      "type": "object",
+      "properties": {
+        "install_root": { "type": ["string", "null"] },
+        "steam_buildid": { "type": ["string", "null"] },
+        "last_updated": { "type": ["string", "null"] },
+        "last_played": { "type": ["string", "null"] },
+        "manifest": { "anyOf": [{ "$ref": "#/$defs/fileEvidence" }, { "type": "null" }] },
+        "required_binaries": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["verdict"],
+            "properties": {
+              "file": { "$ref": "#/$defs/fileEvidence" },
+              "verdict": { "$ref": "#/$defs/claimVerdict" }
+            }
+          }
+        }
+      },
+      "required": ["required_binaries"]
+    },
+    "config": {
+      "type": "object",
+      "required": ["values"],
+      "properties": {
+        "config_source": { "type": ["string", "null"] },
+        "config_confidence": { "type": ["string", "null"] },
+        "config_file": { "anyOf": [{ "$ref": "#/$defs/fileEvidence" }, { "type": "null" }] },
+        "values": { "type": "object" }
+      }
+    },
+    "mods": {
+      "type": "object",
+      "required": ["artifacts"],
+      "properties": {
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["state", "verdict", "evidence", "forensic_evidence"],
+            "properties": {
+              "state": { "$ref": "#/$defs/modState" },
+              "verdict": { "$ref": "#/$defs/claimVerdict" },
+              "evidence": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/fileEvidence" }
+              },
+              "forensic_evidence": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/fileEvidence" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "crowd_profile": {
+      "type": "object",
+      "required": ["high_crowd_profile", "settings_source"],
+      "properties": {
+        "base_crowd_density": { "type": ["string", "null"] },
+        "high_crowd_profile": { "$ref": "#/$defs/claimVerdict" },
+        "settings_source": { "type": "string", "enum": ["persisted", "defaults", "unknown"] },
+        "ultra_plus_crowds_enabled": { "type": ["boolean", "null"] },
+        "ultra_plus_mode": { "type": ["string", "null"] },
+        "nova_crowds": {
+          "type": ["object", "null"],
+          "properties": {
+            "multiplier": { "type": ["integer", "null"] },
+            "shuffle_amount": { "type": ["integer", "null"] },
+            "disable_lq_crowds": { "type": ["boolean", "null"] }
+          }
+        }
+      }
+    },
+    "path_tracing": {
+      "type": "object",
+      "required": ["ultra_plus_mode", "verdict"],
+      "properties": {
+        "ray_tracing": { "type": ["boolean", "null"] },
+        "ray_traced_path_tracing": { "type": ["boolean", "null"] },
+        "ray_traced_path_tracing_for_photo_mode": { "type": ["boolean", "null"] },
+        "ultra_plus_mode": { "type": "string" },
+        "verdict": { "$ref": "#/$defs/claimVerdict" }
+      }
+    },
+    "dlss": {
+      "type": "object",
+      "required": [
+        "dlss_4_download_verified",
+        "dlss_transformer_selected",
+        "dlss_upscaling_enabled"
+      ],
+      "properties": {
+        "resolution_scaling": { "type": ["string", "null"] },
+        "dlss_backend_preset": { "type": ["string", "null"] },
+        "dlss": { "type": ["string", "null"] },
+        "dlss_d": { "type": ["boolean", "null"] },
+        "dlss_frame_gen": { "type": ["boolean", "null"] },
+        "dlss_multi_frame_generation": { "type": ["string", "null"] },
+        "dlss_4_download_verified": { "$ref": "#/$defs/claimVerdict" },
+        "dlss_transformer_selected": { "$ref": "#/$defs/claimVerdict" },
+        "dlss_upscaling_enabled": { "$ref": "#/$defs/claimVerdict" }
+      }
+    },
+    "runtime": {
+      "type": ["object", "null"],
+      "properties": {
+        "telemetry_path": { "type": ["string", "null"] },
+        "file_type": { "type": ["string", "null"] },
+        "thresholds": { "$ref": "#/$defs/runtimeThresholds" },
+        "metrics": { "anyOf": [{ "$ref": "#/$defs/runtimeMetrics" }, { "type": "null" }] },
+        "runtime_parse_error": { "type": ["string", "null"] },
+        "runtime_corroboration": { "$ref": "#/$defs/claimVerdict" }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/claimVerdict" }
+    },
+    "overall_status": {
+      "type": "string",
+      "enum": ["pass", "warning", "error"]
+    },
+    "error_details": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/errorDetail" }
+    }
+  },
+  "$defs": {
+    "fileEvidence": {
+      "type": "object",
+      "required": ["path", "source_label", "size_bytes", "readable", "is_symlink"],
+      "properties": {
+        "path": { "type": "string" },
+        "source_label": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "mtime": { "type": ["string", "null"] },
+        "readable": { "type": "boolean" },
+        "is_symlink": { "type": "boolean" }
+      }
+    },
+    "claimVerdict": {
+      "type": "string",
+      "enum": ["pass", "fail", "inconclusive", "error"]
+    },
+    "modState": {
+      "type": "string",
+      "enum": ["active_installed", "downloaded_only", "partially_installed_broken", "missing"]
+    },
+    "errorDetail": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "path": { "type": ["string", "null"] }
+      }
+    },
+    "runtimeThresholds": {
+      "type": "object",
+      "required": ["avg_gpu_w", "max_gpu_w", "max_vram_mb", "max_pcie_rx_mb_s"],
+      "properties": {
+        "avg_gpu_w": { "type": "number" },
+        "max_gpu_w": { "type": "number" },
+        "max_vram_mb": { "type": "number" },
+        "max_pcie_rx_mb_s": { "type": "number" }
+      }
+    },
+    "runtimeMetrics": {
+      "type": "object",
+      "required": ["avg_gpu_w", "max_gpu_w", "avg_vram_mb", "max_vram_mb", "avg_pcie_rx_mb_s", "max_pcie_rx_mb_s"],
+      "properties": {
+        "avg_gpu_w": { "type": "number" },
+        "max_gpu_w": { "type": "number" },
+        "avg_vram_mb": { "type": "number" },
+        "max_vram_mb": { "type": "number" },
+        "avg_pcie_rx_mb_s": { "type": "number" },
+        "max_pcie_rx_mb_s": { "type": "number" }
+      }
+    }
+  }
+}
