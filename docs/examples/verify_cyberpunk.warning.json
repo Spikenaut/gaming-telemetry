@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-04-18T20:00:00Z",
+  "workload_profile": "cp2077_modded_ultraplus_pt_dlss4_hdtextures_highcrowd",
+  "game": {
+    "search_paths": [],
+    "selected_game_root": null,
+    "selected_manifest": null,
+    "selected_proton_prefix": null
+  },
+  "install": {
+    "install_root": "/home/example/.local/share/Steam/steamapps/common/Cyberpunk 2077",
+    "steam_buildid": "20383525",
+    "last_updated": "1775627166",
+    "last_played": "1775691532",
+    "manifest": null,
+    "required_binaries": {}
+  },
+  "config": {
+    "config_source": "/home/example/.../UserSettings.json",
+    "config_confidence": "high",
+    "config_file": null,
+    "values": {
+      "ResolutionScaling": "FSR2",
+      "DLSS_BackendPreset": "Transformer",
+      "RayTracing": true,
+      "RayTracedPathTracing": false,
+      "/graphics/performance CrowdDensity": "High"
+    }
+  },
+  "mods": {
+    "artifacts": {
+      "cet_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "dlss_enabler_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "fake_pt_light_fix_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "hd_textures_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "nova_crowds_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] },
+      "ultra_plus_active": { "state": "active_installed", "verdict": "pass", "evidence": [], "forensic_evidence": [] }
+    }
+  },
+  "crowd_profile": {
+    "base_crowd_density": "High",
+    "high_crowd_profile": "pass",
+    "settings_source": "defaults",
+    "ultra_plus_crowds_enabled": true,
+    "ultra_plus_mode": "unknown/default",
+    "nova_crowds": {
+      "multiplier": 1,
+      "shuffle_amount": 2,
+      "disable_lq_crowds": false
+    }
+  },
+  "path_tracing": {
+    "ray_tracing": true,
+    "ray_traced_path_tracing": false,
+    "ray_traced_path_tracing_for_photo_mode": false,
+    "ultra_plus_mode": "unknown/default",
+    "verdict": "fail"
+  },
+  "dlss": {
+    "resolution_scaling": "FSR2",
+    "dlss_backend_preset": "Transformer",
+    "dlss": "Auto",
+    "dlss_d": false,
+    "dlss_frame_gen": false,
+    "dlss_multi_frame_generation": "x2",
+    "dlss_4_download_verified": "pass",
+    "dlss_transformer_selected": "pass",
+    "dlss_upscaling_enabled": "fail"
+  },
+  "runtime": null,
+  "verdict": {
+    "dlss_4_download_verified": "pass",
+    "dlss_transformer_selected": "pass",
+    "dlss_upscaling_enabled": "fail",
+    "path_tracing_enabled": "fail",
+    "high_crowd_profile": "pass",
+    "cet_active": "pass",
+    "dlss_enabler_active": "pass",
+    "fake_pt_light_fix_active": "pass",
+    "hd_textures_active": "pass",
+    "nova_crowds_active": "pass",
+    "ultra_plus_active": "pass"
+  },
+  "overall_status": "warning",
+  "error_details": []
+}

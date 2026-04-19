@@ -57,6 +57,41 @@ Use the query utility for ad-hoc analysis:
 cargo run --bin query gpu_telemetry_v1_batch_1.parquet
 ```
 
+### 4. Verify The Cyberpunk Workload
+Run the read-only verifier when you need a stable sidecar describing whether the target research workload is actually active:
+```bash
+cargo run --bin verify_cyberpunk -- [--telemetry PATH] [--out PATH] [--format text|json] [--runtime-thresholds JSON] [--debug] [--dry-run]
+```
+
+Search order:
+- `~/.local/share/Steam/steamapps/common/Cyberpunk 2077`
+- `~/.steam/steam/steamapps/common/Cyberpunk 2077`
+- Proton prefix `~/.local/share/Steam/steamapps/compatdata/1091500/pfx/drive_c/users/steamuser/`
+- Flatpak `~/.var/app/com.valvesoftware.Steam/`
+
+Exit codes:
+- `0`: verifier completed with `pass` or `warning`
+- `1`: verifier completed with `error`
+- `2`: usage, discovery, or unreadable input/config error
+- `3`: runtime telemetry parse error
+
+Examples:
+```bash
+cargo run --bin verify_cyberpunk --
+```
+
+```bash
+cargo run --bin verify_cyberpunk -- --format text
+```
+
+```bash
+cargo run --bin verify_cyberpunk -- \
+  --telemetry tests/fixtures/runtime/pass.csv \
+  --runtime-thresholds '{"avg_gpu_w":210,"max_gpu_w":290,"max_vram_mb":12000,"max_pcie_rx_mb_s":900,"avg_cpu_w":100}'
+```
+
+The verifier never modifies game files. `--dry-run` enforces stdout-only output and keeps the command strictly read-only.
+
 ## Replay Contract
 
 One-way flow:
