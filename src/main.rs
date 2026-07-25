@@ -238,7 +238,11 @@ async fn settle_write_handle(handle: JoinHandle<Result<()>>, write_failures: &mu
 }
 
 /// Reap finished handles; if still at capacity, await the oldest (backpressure).
-async fn reclaim_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_failures: &mut u32) {
+/// Returns `true` if Ctrl+C arrived while waiting so the outer loop can shut down.
+async fn reclaim_in_flight(
+    in_flight: &mut Vec<JoinHandle<Result<()>>>,
+    write_failures: &mut u32,
+) -> bool {
     let mut i = 0;
     while i < in_flight.len() {
         if in_flight[i].is_finished() {
@@ -250,8 +254,29 @@ async fn reclaim_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_fa
     }
     while in_flight.len() >= MAX_IN_FLIGHT_WRITES {
         let handle = in_flight.remove(0);
-        settle_write_handle(handle, write_failures).await;
+        tokio::select! {
+            res = handle => {
+                match res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        *write_failures += 1;
+                        let redacted = privacy::redact_personal_path(&format!("{:?}", e));
+                        eprintln!("Failed to write to Parquet: {}", redacted);
+                        sentry::capture_message(&redacted, sentry::Level::Error);
+                    }
+                    Err(e) => {
+                        *write_failures += 1;
+                        eprintln!("In-flight parquet write task failed: {}", e);
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                // Leave remaining in_flight for drain on shutdown path.
+                return true;
+            }
+        }
     }
+    false
 }
 
 async fn drain_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_failures: &mut u32) {
@@ -343,8 +368,33 @@ async fn main() -> Result<()> {
                 buffer.push(sample);
 
                 if buffer.len() >= BUFFER_SIZE {
-                    reclaim_in_flight(&mut in_flight, &mut write_failures).await;
-                    let samples_to_write = std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
+                    if reclaim_in_flight(&mut in_flight, &mut write_failures).await {
+                        // Ctrl+C while waiting for disk; fall through to shared shutdown.
+                        if !buffer.is_empty() {
+                            batch_counter += 1;
+                            if let Err(e) = write_to_parquet(
+                                std::mem::take(&mut buffer),
+                                batch_counter,
+                            ) {
+                                write_failures += 1;
+                                let redacted =
+                                    privacy::redact_personal_path(&format!("{:?}", e));
+                                eprintln!("Failed to write final batch: {}", redacted);
+                                sentry::capture_message(&redacted, sentry::Level::Error);
+                            }
+                        }
+                        println!("\nShutdown signal received during write backpressure...");
+                        drain_in_flight(&mut in_flight, &mut write_failures).await;
+                        if write_failures > 0 {
+                            anyhow::bail!(
+                                "Graceful shutdown finished with {write_failures} parquet write failure(s)"
+                            );
+                        }
+                        println!("Graceful shutdown complete.");
+                        break;
+                    }
+                    let samples_to_write =
+                        std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
                     batch_counter += 1;
                     in_flight.push(spawn_parquet_write(samples_to_write, batch_counter));
                 }
