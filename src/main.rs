@@ -98,9 +98,11 @@ fn init_sentry() -> Option<ClientInitGuard> {
     Some(guard)
 }
 
-/// Resolve multi-game session label. CLI `--label` / `--session-label` wins over `SESSION_LABEL`.
+/// Resolve multi-game session label. CLI `--label` / `--session-label` wins over env.
 /// Default is empty (unlabeled) for backward-compatible silence.
-fn resolve_session_label(args: &[String]) -> String {
+///
+/// `env_label` is injected for tests; production passes `SESSION_LABEL` when set.
+fn resolve_session_label_from(args: &[String], env_label: Option<&str>) -> String {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -110,7 +112,6 @@ fn resolve_session_label(args: &[String]) -> String {
                         return value.trim().to_owned();
                     }
                 }
-                i += 1;
             }
             flag if flag.starts_with("--label=") => {
                 return flag.trim_start_matches("--label=").trim().to_owned();
@@ -126,11 +127,16 @@ fn resolve_session_label(args: &[String]) -> String {
         i += 1;
     }
 
-    std::env::var("SESSION_LABEL")
-        .ok()
-        .map(|value| value.trim().to_owned())
+    env_label
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_default()
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn resolve_session_label(args: &[String]) -> String {
+    let env = std::env::var("SESSION_LABEL").ok();
+    resolve_session_label_from(args, env.as_deref())
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +165,8 @@ struct GpuSample {
 }
 
 const BUFFER_SIZE: usize = 2000; // ~10 seconds of data at default 5ms intervals
+/// Cap outstanding async Parquet writes so a slow disk cannot queue unbounded batches.
+const MAX_IN_FLIGHT_WRITES: usize = 2;
 
 fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
     let timestamps: Vec<i64> = samples
@@ -225,17 +233,50 @@ fn is_mangohud_running() -> bool {
         .unwrap_or(false)
 }
 
-fn spawn_parquet_write(samples: Vec<GpuSample>, batch_id: u32) -> JoinHandle<()> {
+fn spawn_parquet_write(samples: Vec<GpuSample>, batch_id: u32) -> JoinHandle<Result<()>> {
     let hub = sentry::Hub::current();
     tokio::task::spawn_blocking(move || {
-        sentry::Hub::run(hub, || {
-            if let Err(e) = write_to_parquet(samples, batch_id) {
-                let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-                eprintln!("Failed to write to Parquet: {}", redacted);
-                sentry::capture_message(&redacted, sentry::Level::Error);
-            }
-        });
+        sentry::Hub::run(hub, || write_to_parquet(samples, batch_id))
     })
+}
+
+async fn settle_write_handle(handle: JoinHandle<Result<()>>, write_failures: &mut u32) {
+    match handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            *write_failures += 1;
+            let redacted = privacy::redact_personal_path(&format!("{:?}", e));
+            eprintln!("Failed to write to Parquet: {}", redacted);
+            sentry::capture_message(&redacted, sentry::Level::Error);
+        }
+        Err(e) => {
+            *write_failures += 1;
+            eprintln!("In-flight parquet write task failed: {}", e);
+        }
+    }
+}
+
+/// Reap finished handles; if still at capacity, await the oldest (backpressure).
+async fn reclaim_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_failures: &mut u32) {
+    let mut i = 0;
+    while i < in_flight.len() {
+        if in_flight[i].is_finished() {
+            let handle = in_flight.remove(i);
+            settle_write_handle(handle, write_failures).await;
+        } else {
+            i += 1;
+        }
+    }
+    while in_flight.len() >= MAX_IN_FLIGHT_WRITES {
+        let handle = in_flight.remove(0);
+        settle_write_handle(handle, write_failures).await;
+    }
+}
+
+async fn drain_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_failures: &mut u32) {
+    for handle in in_flight.drain(..) {
+        settle_write_handle(handle, write_failures).await;
+    }
 }
 
 #[tokio::main]
@@ -258,7 +299,8 @@ async fn main() -> Result<()> {
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
     let mut batch_counter = 0u32;
     let mut cpu_monitor = CpuMonitor::new();
-    let mut in_flight: Vec<JoinHandle<()>> = Vec::new();
+    let mut in_flight: Vec<JoinHandle<Result<()>>> = Vec::new();
+    let mut write_failures: u32 = 0;
 
     println!(
         "Starting GPU telemetry: poll_interval_ms={} session_label={:?}",
@@ -319,6 +361,7 @@ async fn main() -> Result<()> {
                 buffer.push(sample);
 
                 if buffer.len() >= BUFFER_SIZE {
+                    reclaim_in_flight(&mut in_flight, &mut write_failures).await;
                     let samples_to_write = std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
                     batch_counter += 1;
                     in_flight.push(spawn_parquet_write(samples_to_write, batch_counter));
@@ -329,15 +372,17 @@ async fn main() -> Result<()> {
                 if !buffer.is_empty() {
                     batch_counter += 1;
                     if let Err(e) = write_to_parquet(buffer, batch_counter) {
+                        write_failures += 1;
                         let redacted = privacy::redact_personal_path(&format!("{:?}", e));
                         eprintln!("Failed to write final batch: {}", redacted);
                         sentry::capture_message(&redacted, sentry::Level::Error);
                     }
                 }
-                for handle in in_flight.drain(..) {
-                    if let Err(e) = handle.await {
-                        eprintln!("In-flight parquet write task failed: {}", e);
-                    }
+                drain_in_flight(&mut in_flight, &mut write_failures).await;
+                if write_failures > 0 {
+                    anyhow::bail!(
+                        "Graceful shutdown finished with {write_failures} parquet write failure(s)"
+                    );
                 }
                 println!("Graceful shutdown complete.");
                 break;
@@ -354,36 +399,32 @@ mod tests {
 
     #[test]
     fn resolve_session_label_cli_over_env() {
+        // Pure helper tests — no process env mutation (avoids races under cargo test).
         let args = vec![
             "gaming-telemetry".to_string(),
             "--label".to_string(),
             "kcd2".to_string(),
         ];
-        assert_eq!(resolve_session_label(&args), "kcd2");
+        assert_eq!(
+            resolve_session_label_from(&args, Some("env_should_lose")),
+            "kcd2"
+        );
 
         let args = vec![
             "gaming-telemetry".to_string(),
             "--session-label=re2r".to_string(),
         ];
-        assert_eq!(resolve_session_label(&args), "re2r");
+        assert_eq!(
+            resolve_session_label_from(&args, Some("env_should_lose")),
+            "re2r"
+        );
 
         let args = vec!["gaming-telemetry".to_string()];
-        assert_eq!(resolve_session_label(&args), "");
-    }
-
-    #[test]
-    fn resolve_session_label_reads_env_when_no_cli() {
-        // Keep env mutations isolated to this test body; do not parallelize with other
-        // env-mutating tests (same pattern as Sentry helpers test).
-        unsafe {
-            std::env::set_var("SESSION_LABEL", "re_requiem");
-        }
-        let args = vec!["gaming-telemetry".to_string()];
-        let label = resolve_session_label(&args);
-        unsafe {
-            std::env::remove_var("SESSION_LABEL");
-        }
-        assert_eq!(label, "re_requiem");
+        assert_eq!(resolve_session_label_from(&args, None), "");
+        assert_eq!(
+            resolve_session_label_from(&args, Some("re_requiem")),
+            "re_requiem"
+        );
     }
 
     #[test]

@@ -82,7 +82,8 @@ collector -> gpu_telemetry_v1_batch_N.parquet -> export_csv -> canonical.csv -> 
 ```
 
 ```bash
-cargo run --example csv_replay -- canonical.csv
+# From the corinth-canal checkout (not this repo root):
+cargo run --example csv_replay --manifest-path path/to/corinth-canal/Cargo.toml -- canonical.csv
 ```
 
 For multi-title training mixes, group by Parquet `session_label` (or by folder under `neuromorphic_data/`).

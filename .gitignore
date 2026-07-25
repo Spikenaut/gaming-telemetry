@@ -46,3 +46,9 @@ remotes.txt
 !.mimocode/mimocode.jsonc
 !.mimocode/AGENTS.md
 !.kilocodeignore
+
+# Lockfile left untracked for this simplify PR (was ignored historically)
+Cargo.lock
+
+# Generated telemetry batches (collector writes to CWD by default)
+*.parquet
