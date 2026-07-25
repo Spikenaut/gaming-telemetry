@@ -436,6 +436,64 @@ mod tests {
             resolve_session_label_from_env(Some("kcd2;rm -rf /")),
             "kcd2rm-rf"
         );
+        let long = "a".repeat(80);
+        assert_eq!(sanitize_session_label(&long).len(), 64);
+        assert_eq!(sanitize_session_label("...ok"), "...ok");
+    }
+
+    fn sample_fixture(label: &str) -> GpuSample {
+        GpuSample {
+            timestamp: Utc::now(),
+            session_label: label.to_owned(),
+            power_usage_mw: 120_000,
+            temperature_c: 65,
+            graphics_clock_mhz: 2500,
+            memory_clock_mhz: 10000,
+            pcie_rx_throughput_kbps: 100,
+            pcie_tx_throughput_kbps: 50,
+            pstate: 0,
+            throttle_reasons: 0,
+            fan_speed_perc: 40,
+            memory_used_mb: 8_000,
+            memory_total_mb: 16_000,
+            encoder_util_perc: 0,
+            decoder_util_perc: 0,
+            mangohud_active: false,
+            cpu_tctl_c: 55.0,
+            cpu_ccd1_c: 50.0,
+            cpu_ccd2_c: 51.0,
+            cpu_package_power_w: 80.0,
+        }
+    }
+
+    #[test]
+    fn write_to_parquet_emits_labeled_batch_file() {
+        let batch_id = 99_001;
+        let path = format!("gpu_telemetry_v1_batch_{batch_id}.parquet");
+        let _ = std::fs::remove_file(&path);
+        write_to_parquet(
+            vec![sample_fixture("kcd2"), sample_fixture("kcd2")],
+            batch_id,
+        )
+        .expect("parquet write");
+        assert!(std::path::Path::new(&path).is_file());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_write_result_counts_io_failures() {
+        let mut fails = 0u32;
+        record_write_result(Ok(Ok(())), &mut fails);
+        assert_eq!(fails, 0);
+        record_write_result(Ok(Err(anyhow::anyhow!("disk full"))), &mut fails);
+        assert_eq!(fails, 1);
+        // JoinError is hard to construct without panicking a task; skip Err arm here.
+    }
+
+    #[test]
+    fn is_mangohud_running_does_not_panic() {
+        // Presence depends on host; just ensure the helper is callable in CI.
+        let _ = is_mangohud_running();
     }
 
     #[test]
