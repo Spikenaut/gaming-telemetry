@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::process::Command;
 use tokio::task::JoinHandle;
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, Duration, MissedTickBehavior};
 
 fn git_sha() -> String {
     if let Some(value) = std::env::var("AGENTOS_GIT_SHA")
@@ -297,6 +297,8 @@ async fn main() -> Result<()> {
 
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
+    // After write backpressure, do not burst-catch every missed 5ms tick.
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut batch_counter = 0u32;
     let mut cpu_monitor = CpuMonitor::new();
     let mut in_flight: Vec<JoinHandle<Result<()>>> = Vec::new();
