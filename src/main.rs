@@ -137,7 +137,6 @@ struct GpuSample {
     memory_total_mb: u64,
     encoder_util_perc: u32,
     decoder_util_perc: u32,
-    mangohud_active: bool,
     // CPU telemetry
     cpu_tctl_c: f32,
     cpu_ccd1_c: f32,
@@ -168,7 +167,6 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
     let mem_total: Vec<u64> = samples.iter().map(|s| s.memory_total_mb).collect();
     let enc_util: Vec<u32> = samples.iter().map(|s| s.encoder_util_perc).collect();
     let dec_util: Vec<u32> = samples.iter().map(|s| s.decoder_util_perc).collect();
-    let mangohud: Vec<bool> = samples.iter().map(|s| s.mangohud_active).collect();
     let cpu_tctl: Vec<f32> = samples.iter().map(|s| s.cpu_tctl_c).collect();
     let cpu_ccd1: Vec<f32> = samples.iter().map(|s| s.cpu_ccd1_c).collect();
     let cpu_ccd2: Vec<f32> = samples.iter().map(|s| s.cpu_ccd2_c).collect();
@@ -190,7 +188,6 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
         "memory_total_mb" => mem_total,
         "encoder_util_perc" => enc_util,
         "decoder_util_perc" => dec_util,
-        "mangohud_active" => mangohud,
         "cpu_tctl_c" => cpu_tctl,
         "cpu_ccd1_c" => cpu_ccd1,
         "cpu_ccd2_c" => cpu_ccd2,
@@ -203,15 +200,6 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
 
     println!("Wrote batch {} to {}", batch_id, filename);
     Ok(())
-}
-
-fn is_mangohud_running() -> bool {
-    Command::new("pgrep")
-        .arg("-x")
-        .arg("mangohud")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 fn spawn_parquet_write(samples: Vec<GpuSample>, batch_id: u32) -> JoinHandle<Result<()>> {
@@ -327,9 +315,6 @@ async fn main() -> Result<()> {
                 let encoder_util = device.encoder_utilization().map(|u| u.utilization).unwrap_or(0);
                 let decoder_util = device.decoder_utilization().map(|u| u.utilization).unwrap_or(0);
 
-                // MangoHud integration
-                let mangohud_active = is_mangohud_running();
-
                 // CPU telemetry (poll for time-delta power calculation)
                 let (cpu_tctl_c, cpu_package_power_w) = cpu_monitor.poll();
                 let cpu_ccd1_c = cpu_monitor.read_ccd1();
@@ -351,7 +336,6 @@ async fn main() -> Result<()> {
                     memory_total_mb: mem_info.as_ref().map(|m| m.total / 1024 / 1024).unwrap_or(0),
                     encoder_util_perc: encoder_util,
                     decoder_util_perc: decoder_util,
-                    mangohud_active,
                     cpu_tctl_c,
                     cpu_ccd1_c,
                     cpu_ccd2_c,
@@ -458,7 +442,6 @@ mod tests {
             memory_total_mb: 16_000,
             encoder_util_perc: 0,
             decoder_util_perc: 0,
-            mangohud_active: false,
             cpu_tctl_c: 55.0,
             cpu_ccd1_c: 50.0,
             cpu_ccd2_c: 51.0,
@@ -488,12 +471,6 @@ mod tests {
         record_write_result(Ok(Err(anyhow::anyhow!("disk full"))), &mut fails);
         assert_eq!(fails, 1);
         // JoinError is hard to construct without panicking a task; skip Err arm here.
-    }
-
-    #[test]
-    fn is_mangohud_running_does_not_panic() {
-        // Presence depends on host; just ensure the helper is callable in CI.
-        let _ = is_mangohud_running();
     }
 
     #[test]

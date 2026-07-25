@@ -20,9 +20,10 @@ There is **no** game-install verifier, Steam/Proton discovery, or mod scanner. G
 - Performance state & throttle reasons
 - Fan speed, VRAM used/total
 - Encoder/decoder utilization
-- Optional MangoHud process presence
 - CPU Tctl / CCD temps and package power (hwmon + RAPL energy delta)
 - **`session_label`** (string; same for every row in a run)
+
+MangoHud (or any overlay) is **not** recorded. You may still run it yourself for on-screen monitoring; the collector only writes hardware telemetry.
 
 ## Prerequisites
 
@@ -45,9 +46,8 @@ SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry
 Then:
 
 1. Set the game to the highest graphics settings available.
-2. Optionally enable MangoHud.
-3. Play the session while the collector runs (default poll: **5 ms**, override with `POLL_INTERVAL_MS`).
-4. Ctrl+C to flush the last batch and exit.
+2. Play the session while the collector runs (default poll: **5 ms**, override with `POLL_INTERVAL_MS`).
+3. Ctrl+C to flush the last batch and exit.
 
 Output files:
 
@@ -96,7 +96,7 @@ For multi-title training mixes, group by Parquet `session_label` (or by folder u
 | Resident Evil Requiem | `re_requiem` |
 | Cyberpunk 2077 (optional) | `cp2077` |
 
-Max settings + optional MangoHud only. No install path is required by this repo.
+Max settings only. No install path is required by this repo.
 
 ## Design notes
 
