@@ -1,103 +1,110 @@
 # Gaming Telemetry: Neuromorphic Data Collector for SNN Training
 
 ## Overview
-This high-performance Rust daemon is designed to capture high-fidelity GPU telemetry data from demanding gaming workloads. Specifically optimized for systems running **Resident Evil 4** and **Cyberpunk 2077** with **Path Tracing** and **DLSS 4.0**, it provides the rich, high-frequency time-series data required to train **Spiking Neural Networks (SNNs)** and Liquid State Machines.
 
-The collector identifies "excitatory" spikes (e.g., PCIe bus floods during asset loading) and "inhibitory" signals (e.g., thermal throttling or power caps), mimicking the dynamics of biological neural systems.
+High-frequency GPU/CPU telemetry for a workstation (optimized for **RTX 5080** under max-settings games). The collector is **game-agnostic**: it reads NVIDIA NVML + Linux CPU sensors and writes Parquet batches for neuromorphic / SNN training.
 
-## Key Features
-- **Ultra-Low Latency Polling**: Captures metrics at **5-millisecond intervals** using the NVIDIA Management Library (NVML).
-- **Asynchronous I/O**: To prevent performance drops during heavy gaming (Path Tracing), data is buffered in memory and written to versioned **Parquet** files (`gpu_telemetry_v1_batch_N.parquet`) asynchronously using `tokio` and `polars`.
-- **DuckDB Integration**: Includes a built-in query utility for instant analysis of the captured Parquet batches.
-- **Rich Metric Suite**: Captures complex hardware states beyond simple temperature and power.
+Signals map roughly to an artificial “nervous system” for models that need to learn how compute load moves a GPU:
 
-## Captured Metrics
-The telemetry captures a blend of fast-moving transients and slow-moving momentum metrics:
-- **PCIe Rx/Tx Throughput**: Detects data floods from the CPU/Memory (e.g., BVH structure updates for Path Tracing).
-- **Power Usage & Temperature**: High-frequency transients.
-- **Graphics & Memory Clocks**: Tracking the "firing rate" of the silicon.
-- **Throttle Reasons**: Captures bitmasks for Power, Thermal, and Sync limits (Inhibitory signals).
-- **Fan Speed (RPM)**: A slow-moving physical momentum metric.
-- **VRAM Utilization**: Tracks spatial memory pressure and allocation spikes.
+- **Excitatory**: PCIe floods, power/clock spikes, VRAM allocation jumps
+- **Inhibitory**: thermal / power throttle bitmasks
+- **State / momentum**: fan speed, absolute VRAM usage
+
+There is **no** game-install verifier, Steam/Proton discovery, or mod scanner. Graphics settings are an **operator checklist**, not code. New titles only need a new `SESSION_LABEL` and a play session.
+
+## Captured metrics
+
+- Power usage & temperature
+- Graphics & memory clocks
+- PCIe Rx/Tx throughput
+- Performance state & throttle reasons
+- Fan speed, VRAM used/total
+- Encoder/decoder utilization
+- Optional MangoHud process presence
+- CPU Tctl / CCD temps and package power (hwmon + RAPL energy delta)
+- **`session_label`** (string; same for every row in a run)
 
 ## Prerequisites
-- **OS**: Fedora 43 Linux
-- **GPU**: NVIDIA (Optimized for RTX 50-series, compatible with others)
-- **Drivers**: Proprietary NVIDIA drivers with NVML support.
-- **Build Tools**: Rust (Cargo)
+
+- **OS**: Linux (developed on Fedora)
+- **GPU**: NVIDIA with NVML (RTX 50-series preferred)
+- **Build**: Rust / Cargo
 
 ## Usage
 
-### 1. Start the Telemetry Daemon
-Run the daemon in release mode to ensure minimal overhead and maximum timing accuracy.
+### 1. Capture a labeled session
+
+Use a clean working directory (or `neuromorphic_data/<session>/`) so batches do not mix.
+
 ```bash
-cargo run --release --bin gaming-telemetry
+# Examples: kcd2, re2r, re3r, re_requiem, cp2077, …
+SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry
+
+# Equivalent:
+cargo run --release --bin gaming-telemetry -- --label re2r
 ```
-The daemon continuously polls telemetry and writes versioned batches as:
+
+Then:
+
+1. Set the game to the highest graphics settings available.
+2. Optionally enable MangoHud.
+3. Play the session while the collector runs (default poll: **5 ms**, override with `POLL_INTERVAL_MS`).
+4. Ctrl+C to flush the last batch and exit.
+
+Output files:
 
 `gpu_telemetry_v1_batch_N.parquet`
 
-CPU package power is recorded from the `CpuMonitor` time-delta energy-counter path.
+### 2. Export canonical CSV for `corinth-canal`
 
-### 2. Export Canonical CSV for `corinth-canal`
-Convert one v1 Parquet batch into the stable 5-column replay schema:
+Stable **5-column** replay schema (unchanged; `session_label` stays in Parquet):
+
 ```bash
-cargo run --bin export_csv gpu_telemetry_v1_batch_1.parquet canonical.csv
+cargo run --bin export_csv -- gpu_telemetry_v1_batch_1.parquet canonical.csv
 ```
 
-Canonical CSV header (exact order):
+Header:
 
 `timestamp_ms,gpu_temp_c,gpu_power_w,cpu_tctl_c,cpu_package_power_w`
 
-`gpu_power_w` is exported as `power_usage_mw / 1000.0`. CPU columns come from recorded parquet columns.
+`gpu_power_w` is `power_usage_mw / 1000.0`.
 
-### 3. Optional: Analyze Data with DuckDB
-Use the query utility for ad-hoc analysis:
+### 3. Optional: DuckDB query helper
+
 ```bash
-cargo run --bin query gpu_telemetry_v1_batch_1.parquet
+cargo run --bin query -- gpu_telemetry_v1_batch_1.parquet
 ```
 
-## Replay Contract
+## Replay contract
 
-One-way flow:
-
-`collector -> gpu_telemetry_v1_batch_N.parquet -> export_csv -> canonical.csv -> corinth-canal/examples/csv_replay`
-
-Consumer command in `corinth-canal`:
-```bash
-cargo run --example csv_replay canonical.csv
+```text
+collector -> gpu_telemetry_v1_batch_N.parquet -> export_csv -> canonical.csv -> corinth-canal/examples/csv_replay
 ```
 
-## Privacy and Safe Cyberpunk 2077 Telemetry Capture
-
-The core `gaming-telemetry` collector performs **only hardware telemetry** (NVIDIA NVML GPU metrics at 5 ms + CPU power/temps via hwmon/RAPL) and writes Parquet/CSV outputs to the **current working directory**. It does **not** scan user home directories, discover Steam libraries, read Proton prefixes, or embed personal paths anywhere in its operation or data.
-
-### Recommended Safe Workflow for Cyberpunk 2077 (Path Tracing + DLSS 4.0)
-1. Run the collector from a clean, dedicated working directory (or `cd` into one) so that generated `gpu_telemetry_v1_batch_*.parquet` files stay isolated and do not mix with personal data.
-2. Launch Cyberpunk 2077 with MangoHud enabled (the collector detects `mangohud_active` and records it for correlation).
-3. Use `cargo run --bin export_csv ...` and the DuckDB `query` bin for analysis — all outputs remain under your control.
-4. Keep telemetry sessions in version-controlled or ephemeral directories when sharing data for SNN training (e.g. with `corinth-canal`).
-
-**Note on setup verification:** A minimal `verify_cyberpunk` skeleton has been restored (src/bin/verify_cyberpunk.rs) to address #9. It is a privacy-safe placeholder for the full workload verifier (PT, DLSS 4 Transformer, UltraPlus/CET mods, crowd, HD textures, etc.).
-
-It **requires** an explicit `--game-path` (never auto-discovers $HOME/Steam/Proton/compatdata). Every path in its text/JSON output is redacted by default using the same `redact_personal_path` helpers (see privacy.rs and #10/#14).
-
-Example (CI guard also exercises this against fixtures + synthetic redaction test):
 ```bash
-cargo run --bin verify_cyberpunk -- --game-path ./tests/fixtures/mods/pass --format text --dry-run
-cargo run --bin verify_cyberpunk -- --game-path /path/you/control/for/Cyberpunk\ 2077 --format json
+cargo run --example csv_replay -- canonical.csv
 ```
 
-All output stays redacted. This (plus the core collector never walking personal dirs, the privacy guard job, and updated CI) makes the repo ready for privacy-safe CP2077 telemetry capture. Full deep checks can be expanded in the skeleton later.
+For multi-title training mixes, group by Parquet `session_label` (or by folder under `neuromorphic_data/`).
 
-See parent #7, #9 (sources), #10 (leaks), #14 (workflow), and the Privacy section above. The CI privacy-and-verify-guard now actually runs it.
+## Operator checklist (not code)
 
-## Architecture for SNNs
-The data collected is structured to be directly useful for Neuromorphic computing:
-- **Excitatory Inputs**: PCIe throughput and VRAM allocation rate.
-- **Firing Rates**: Clock speeds and Power transients.
-- **Inhibitory Inputs**: Thermal/Power throttling bitmasks.
-- **State/Momentum**: Fan speeds and absolute VRAM usage.
+| Title | Suggested `SESSION_LABEL` |
+|-------|---------------------------|
+| Kingdom Come Deliverance 2 | `kcd2` |
+| Resident Evil 2 Remake | `re2r` |
+| Resident Evil 3 Remake | `re3r` |
+| Resident Evil Requiem | `re_requiem` |
+| Cyberpunk 2077 (optional) | `cp2077` |
+
+Max settings + optional MangoHud only. No install path is required by this repo.
+
+## Design notes
+
+- Collector never walks `$HOME`, Steam libraries, or Proton prefixes.
+- Path redaction helpers remain for error logs / query display only.
+- The old Cyberpunk **workload verifier** direction (PR #6 and residual skeleton/CI) was removed; see issue #20 / Linear RM-174.
 
 ## License
-GPL-3.0 License. See [LICENSE](LICENSE) for details.
+
+GPL-3.0. See [LICENSE](LICENSE).

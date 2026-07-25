@@ -1,8 +1,7 @@
 //! Privacy utilities for path redaction and safe handling.
 //!
-//! Goal (per #7 / #14): ensure the project (especially future CP2077 verify tooling
-//! and any reports) never leaks operator home directories, Steam paths, Proton
-//! prefixes, or other personal data by default.
+//! Used for error logs and query display so absolute home paths are not echoed
+//! by default. The collector never walks `$HOME` / Steam / Proton.
 
 use std::env;
 

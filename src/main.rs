@@ -11,7 +11,7 @@ use sentry::ClientInitGuard;
 use std::borrow::Cow;
 use std::fs::File;
 use std::process::Command;
-use std::sync::Arc;
+use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
 fn git_sha() -> String {
@@ -98,9 +98,45 @@ fn init_sentry() -> Option<ClientInitGuard> {
     Some(guard)
 }
 
+/// Resolve multi-game session label. CLI `--label` / `--session-label` wins over `SESSION_LABEL`.
+/// Default is empty (unlabeled) for backward-compatible silence.
+fn resolve_session_label(args: &[String]) -> String {
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--label" | "--session-label" => {
+                if let Some(value) = args.get(i + 1) {
+                    if !value.starts_with('-') {
+                        return value.trim().to_owned();
+                    }
+                }
+                i += 1;
+            }
+            flag if flag.starts_with("--label=") => {
+                return flag.trim_start_matches("--label=").trim().to_owned();
+            }
+            flag if flag.starts_with("--session-label=") => {
+                return flag
+                    .trim_start_matches("--session-label=")
+                    .trim()
+                    .to_owned();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    std::env::var("SESSION_LABEL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 struct GpuSample {
     timestamp: DateTime<Utc>,
+    session_label: String,
     power_usage_mw: u32,
     temperature_c: u32,
     graphics_clock_mhz: u32,
@@ -129,6 +165,7 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
         .iter()
         .map(|s| s.timestamp.timestamp_millis())
         .collect();
+    let session_labels: Vec<String> = samples.iter().map(|s| s.session_label.clone()).collect();
     let power: Vec<u32> = samples.iter().map(|s| s.power_usage_mw).collect();
     let temp: Vec<u32> = samples.iter().map(|s| s.temperature_c).collect();
     let graphics_clock: Vec<u32> = samples.iter().map(|s| s.graphics_clock_mhz).collect();
@@ -150,6 +187,7 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
 
     let mut df = df!(
         "timestamp_ms" => timestamps,
+        "session_label" => session_labels,
         "power_usage_mw" => power,
         "temperature_c" => temp,
         "graphics_clock_mhz" => graphics_clock,
@@ -187,11 +225,27 @@ fn is_mangohud_running() -> bool {
         .unwrap_or(false)
 }
 
+fn spawn_parquet_write(samples: Vec<GpuSample>, batch_id: u32) -> JoinHandle<()> {
+    let hub = sentry::Hub::current();
+    tokio::task::spawn_blocking(move || {
+        sentry::Hub::run(hub, || {
+            if let Err(e) = write_to_parquet(samples, batch_id) {
+                let redacted = privacy::redact_personal_path(&format!("{:?}", e));
+                eprintln!("Failed to write to Parquet: {}", redacted);
+                sentry::capture_message(&redacted, sentry::Level::Error);
+            }
+        });
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _sentry_guard = init_sentry();
 
-    let nvml = Arc::new(Nvml::init()?);
+    let args: Vec<String> = std::env::args().collect();
+    let session_label = resolve_session_label(&args);
+
+    let nvml = Nvml::init()?;
     let device = nvml.device_by_index(0)?; // Target first GPU
 
     // Configurable poll interval via environment variable
@@ -202,12 +256,13 @@ async fn main() -> Result<()> {
 
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
-    let mut batch_counter = 0;
+    let mut batch_counter = 0u32;
     let mut cpu_monitor = CpuMonitor::new();
+    let mut in_flight: Vec<JoinHandle<()>> = Vec::new();
 
     println!(
-        "Starting enhanced GPU telemetry polling every {}ms...",
-        poll_interval_ms
+        "Starting GPU telemetry: poll_interval_ms={} session_label={:?}",
+        poll_interval_ms, session_label
     );
     println!("Press Ctrl+C to stop gracefully.");
 
@@ -240,6 +295,7 @@ async fn main() -> Result<()> {
 
                 let sample = GpuSample {
                     timestamp: Utc::now(),
+                    session_label: session_label.clone(),
                     power_usage_mw: power_usage,
                     temperature_c: temperature,
                     graphics_clock_mhz: graphics_clock,
@@ -265,22 +321,7 @@ async fn main() -> Result<()> {
                 if buffer.len() >= BUFFER_SIZE {
                     let samples_to_write = std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
                     batch_counter += 1;
-
-                    // Write asynchronously using spawn_blocking to avoid blocking the async runtime.
-                    // Bind Sentry hub so captures in the blocking task are associated (per Sentry async guidance).
-                    let hub = sentry::Hub::current();
-                    tokio::task::spawn_blocking(move || {
-                        sentry::Hub::run(hub, || {
-                            if let Err(e) = write_to_parquet(samples_to_write, batch_counter) {
-                                let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-                                eprintln!("Failed to write to Parquet: {}", redacted);
-                                // Redact error text before sending to Sentry (addresses Coderabbit P1 on
-                                // potential PII in I/O error messages). Also makes `mod privacy` used from
-                                // production code paths in main.rs.
-                                sentry::capture_message(&redacted, sentry::Level::Error);
-                            }
-                        });
-                    });
+                    in_flight.push(spawn_parquet_write(samples_to_write, batch_counter));
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -291,6 +332,11 @@ async fn main() -> Result<()> {
                         let redacted = privacy::redact_personal_path(&format!("{:?}", e));
                         eprintln!("Failed to write final batch: {}", redacted);
                         sentry::capture_message(&redacted, sentry::Level::Error);
+                    }
+                }
+                for handle in in_flight.drain(..) {
+                    if let Err(e) = handle.await {
+                        eprintln!("In-flight parquet write task failed: {}", e);
                     }
                 }
                 println!("Graceful shutdown complete.");
@@ -305,6 +351,40 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_session_label_cli_over_env() {
+        let args = vec![
+            "gaming-telemetry".to_string(),
+            "--label".to_string(),
+            "kcd2".to_string(),
+        ];
+        assert_eq!(resolve_session_label(&args), "kcd2");
+
+        let args = vec![
+            "gaming-telemetry".to_string(),
+            "--session-label=re2r".to_string(),
+        ];
+        assert_eq!(resolve_session_label(&args), "re2r");
+
+        let args = vec!["gaming-telemetry".to_string()];
+        assert_eq!(resolve_session_label(&args), "");
+    }
+
+    #[test]
+    fn resolve_session_label_reads_env_when_no_cli() {
+        // Keep env mutations isolated to this test body; do not parallelize with other
+        // env-mutating tests (same pattern as Sentry helpers test).
+        unsafe {
+            std::env::set_var("SESSION_LABEL", "re_requiem");
+        }
+        let args = vec!["gaming-telemetry".to_string()];
+        let label = resolve_session_label(&args);
+        unsafe {
+            std::env::remove_var("SESSION_LABEL");
+        }
+        assert_eq!(label, "re_requiem");
+    }
 
     #[test]
     fn test_sentry_helpers_env_resolution_and_init() {
