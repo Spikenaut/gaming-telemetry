@@ -134,9 +134,17 @@ fn resolve_session_label_from(args: &[String], env_label: Option<&str>) -> Strin
         .to_owned()
 }
 
+/// Keep session tags as short ASCII identifiers (labels only — never used for paths/exec).
+fn sanitize_session_label(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(64)
+        .collect()
+}
+
 fn resolve_session_label(args: &[String]) -> String {
     let env = std::env::var("SESSION_LABEL").ok();
-    resolve_session_label_from(args, env.as_deref())
+    sanitize_session_label(&resolve_session_label_from(args, env.as_deref()))
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +291,7 @@ async fn drain_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_fail
 async fn main() -> Result<()> {
     let _sentry_guard = init_sentry();
 
+    // CLI argv is only used to read optional session label flags (not paths/exec).
     let args: Vec<String> = std::env::args().collect();
     let session_label = resolve_session_label(&args);
 
@@ -427,6 +436,9 @@ mod tests {
             resolve_session_label_from(&args, Some("re_requiem")),
             "re_requiem"
         );
+
+        assert_eq!(sanitize_session_label("kcd2;rm -rf /"), "kcd2rm-rf");
+        assert_eq!(sanitize_session_label("re_requiem"), "re_requiem");
     }
 
     #[test]
