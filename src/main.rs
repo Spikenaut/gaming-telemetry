@@ -253,9 +253,9 @@ async fn reclaim_in_flight(
         }
     }
     while in_flight.len() >= MAX_IN_FLIGHT_WRITES {
-        let handle = in_flight.remove(0);
+        let mut handle = in_flight.remove(0);
         tokio::select! {
-            res = handle => {
+            res = &mut handle => {
                 match res {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
@@ -271,7 +271,8 @@ async fn reclaim_in_flight(
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                // Leave remaining in_flight for drain on shutdown path.
+                // Preserve the still-running task for drain_in_flight on shutdown.
+                in_flight.insert(0, handle);
                 return true;
             }
         }
