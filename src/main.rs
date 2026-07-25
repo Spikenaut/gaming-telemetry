@@ -221,10 +221,7 @@ fn spawn_parquet_write(samples: Vec<GpuSample>, batch_id: u32) -> JoinHandle<Res
     })
 }
 
-fn record_write_result(
-    res: Result<Result<()>, tokio::task::JoinError>,
-    write_failures: &mut u32,
-) {
+fn record_write_result(res: Result<Result<()>, tokio::task::JoinError>, write_failures: &mut u32) {
     match res {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
