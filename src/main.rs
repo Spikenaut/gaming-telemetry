@@ -221,8 +221,11 @@ fn spawn_parquet_write(samples: Vec<GpuSample>, batch_id: u32) -> JoinHandle<Res
     })
 }
 
-async fn settle_write_handle(handle: JoinHandle<Result<()>>, write_failures: &mut u32) {
-    match handle.await {
+fn record_write_result(
+    res: Result<Result<()>, tokio::task::JoinError>,
+    write_failures: &mut u32,
+) {
+    match res {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             *write_failures += 1;
@@ -235,6 +238,10 @@ async fn settle_write_handle(handle: JoinHandle<Result<()>>, write_failures: &mu
             eprintln!("In-flight parquet write task failed: {}", e);
         }
     }
+}
+
+async fn settle_write_handle(handle: JoinHandle<Result<()>>, write_failures: &mut u32) {
+    record_write_result(handle.await, write_failures);
 }
 
 /// Reap finished handles; if still at capacity, await the oldest (backpressure).
@@ -256,19 +263,7 @@ async fn reclaim_in_flight(
         let mut handle = in_flight.remove(0);
         tokio::select! {
             res = &mut handle => {
-                match res {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        *write_failures += 1;
-                        let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-                        eprintln!("Failed to write to Parquet: {}", redacted);
-                        sentry::capture_message(&redacted, sentry::Level::Error);
-                    }
-                    Err(e) => {
-                        *write_failures += 1;
-                        eprintln!("In-flight parquet write task failed: {}", e);
-                    }
-                }
+                record_write_result(res, write_failures);
             }
             _ = tokio::signal::ctrl_c() => {
                 // Preserve the still-running task for drain_in_flight on shutdown.
