@@ -98,42 +98,6 @@ fn init_sentry() -> Option<ClientInitGuard> {
     Some(guard)
 }
 
-/// Resolve multi-game session label. CLI `--label` / `--session-label` wins over env.
-/// Default is empty (unlabeled) for backward-compatible silence.
-///
-/// `env_label` is injected for tests; production passes `SESSION_LABEL` when set.
-fn resolve_session_label_from(args: &[String], env_label: Option<&str>) -> String {
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--label" | "--session-label" => {
-                if let Some(value) = args.get(i + 1) {
-                    if !value.starts_with('-') {
-                        return value.trim().to_owned();
-                    }
-                }
-            }
-            flag if flag.starts_with("--label=") => {
-                return flag.trim_start_matches("--label=").trim().to_owned();
-            }
-            flag if flag.starts_with("--session-label=") => {
-                return flag
-                    .trim_start_matches("--session-label=")
-                    .trim()
-                    .to_owned();
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    env_label
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("")
-        .to_owned()
-}
-
 /// Keep session tags as short ASCII identifiers (labels only — never used for paths/exec).
 fn sanitize_session_label(raw: &str) -> String {
     raw.chars()
@@ -142,9 +106,18 @@ fn sanitize_session_label(raw: &str) -> String {
         .collect()
 }
 
-fn resolve_session_label(args: &[String]) -> String {
-    let env = std::env::var("SESSION_LABEL").ok();
-    sanitize_session_label(&resolve_session_label_from(args, env.as_deref()))
+/// Multi-game session tag from `SESSION_LABEL` only (no argv parsing).
+/// Default empty = unlabeled.
+fn resolve_session_label_from_env(env_label: Option<&str>) -> String {
+    let raw = env_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    sanitize_session_label(raw)
+}
+
+fn resolve_session_label() -> String {
+    resolve_session_label_from_env(std::env::var("SESSION_LABEL").ok().as_deref())
 }
 
 #[derive(Debug, Clone)]
@@ -291,9 +264,7 @@ async fn drain_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_fail
 async fn main() -> Result<()> {
     let _sentry_guard = init_sentry();
 
-    // CLI argv is only used to read optional session label flags (not paths/exec).
-    let args: Vec<String> = std::env::args().collect();
-    let session_label = resolve_session_label(&args);
+    let session_label = resolve_session_label();
 
     let nvml = Nvml::init()?;
     let device = nvml.device_by_index(0)?; // Target first GPU
@@ -409,36 +380,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_session_label_cli_over_env() {
+    fn resolve_session_label_from_env_sanitizes() {
         // Pure helper tests — no process env mutation (avoids races under cargo test).
-        let args = vec![
-            "gaming-telemetry".to_string(),
-            "--label".to_string(),
-            "kcd2".to_string(),
-        ];
+        assert_eq!(resolve_session_label_from_env(None), "");
+        assert_eq!(resolve_session_label_from_env(Some("")), "");
+        assert_eq!(resolve_session_label_from_env(Some("  kcd2  ")), "kcd2");
         assert_eq!(
-            resolve_session_label_from(&args, Some("env_should_lose")),
-            "kcd2"
-        );
-
-        let args = vec![
-            "gaming-telemetry".to_string(),
-            "--session-label=re2r".to_string(),
-        ];
-        assert_eq!(
-            resolve_session_label_from(&args, Some("env_should_lose")),
-            "re2r"
-        );
-
-        let args = vec!["gaming-telemetry".to_string()];
-        assert_eq!(resolve_session_label_from(&args, None), "");
-        assert_eq!(
-            resolve_session_label_from(&args, Some("re_requiem")),
+            resolve_session_label_from_env(Some("re_requiem")),
             "re_requiem"
         );
-
-        assert_eq!(sanitize_session_label("kcd2;rm -rf /"), "kcd2rm-rf");
-        assert_eq!(sanitize_session_label("re_requiem"), "re_requiem");
+        assert_eq!(
+            resolve_session_label_from_env(Some("kcd2;rm -rf /")),
+            "kcd2rm-rf"
+        );
     }
 
     #[test]

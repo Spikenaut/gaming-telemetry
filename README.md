@@ -39,9 +39,7 @@ Use a clean working directory (or `neuromorphic_data/<session>/`) so batches do 
 ```bash
 # Examples: kcd2, re2r, re3r, re_requiem, cp2077, …
 SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry
-
-# Equivalent:
-cargo run --release --bin gaming-telemetry -- --label re2r
+SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry
 ```
 
 Then:
