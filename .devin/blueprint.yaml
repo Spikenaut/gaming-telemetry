@@ -1,0 +1,35 @@
+# https://docs.devin.ai/onboard-devin/environment-yaml
+# Repo-level environment for rmems/gaming-telemetry (Rust telemetry daemon).
+# Commands run from the repo root.
+
+initialize: |
+  # System dependencies for duckdb bundled build, NVML C wrappers, and sentry transport.
+  sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev
+  sudo rm -rf /var/lib/apt/lists/*
+
+  # Ensure a stable Rust toolchain with clippy and rustfmt.
+  if ! command -v rustup >/dev/null 2>&1; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component clippy,rustfmt
+    echo "PATH=$HOME/.cargo/bin:$PATH" >> "$ENVRC"
+    export PATH="$HOME/.cargo/bin:$PATH"
+  fi
+  rustup default stable
+  rustup component add --toolchain stable clippy rustfmt
+
+maintenance: |
+  # Pre-warm dependency cache for faster first builds/tests.
+  cargo fetch
+
+knowledge:
+  - name: lint
+    contents: |
+      cargo clippy --all-targets -- -D warnings
+  - name: test
+    contents: |
+      cargo test
+  - name: build
+    contents: |
+      cargo build
+  - name: format
+    contents: |
+      cargo fmt --check

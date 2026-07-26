@@ -10,8 +10,9 @@ use polars::prelude::*;
 use sentry::ClientInitGuard;
 use std::borrow::Cow;
 use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tokio::time::{interval, Duration, MissedTickBehavior};
 
 fn git_sha() -> String {
@@ -148,7 +149,7 @@ const BUFFER_SIZE: usize = 2000; // ~10 seconds of data at default 5ms intervals
 /// Cap outstanding async Parquet writes so a slow disk cannot queue unbounded batches.
 const MAX_IN_FLIGHT_WRITES: usize = 2;
 
-fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
+fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -> Result<()> {
     let timestamps: Vec<i64> = samples
         .iter()
         .map(|s| s.timestamp.timestamp_millis())
@@ -194,19 +195,31 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
         "cpu_package_power_w" => cpu_power,
     )?;
 
-    let filename = format!("gpu_telemetry_v1_batch_{}.parquet", batch_id);
+    let filename = output_dir.join(format!("gpu_telemetry_v2_batch_{}.parquet", batch_id));
     let file = File::create(&filename)?;
     ParquetWriter::new(file).finish(&mut df)?;
 
-    println!("Wrote batch {} to {}", batch_id, filename);
+    println!("Wrote batch {} to {}", batch_id, filename.display());
     Ok(())
 }
 
-fn spawn_parquet_write(samples: Vec<GpuSample>, batch_id: u32) -> JoinHandle<Result<()>> {
+fn spawn_parquet_write(
+    in_flight: &mut JoinSet<Result<()>>,
+    samples: Vec<GpuSample>,
+    batch_id: u32,
+    output_dir: PathBuf,
+) {
     let hub = sentry::Hub::current();
-    tokio::task::spawn_blocking(move || {
-        sentry::Hub::run(hub, || write_to_parquet(samples, batch_id))
-    })
+    in_flight.spawn(async move {
+        match tokio::task::spawn_blocking(move || {
+            sentry::Hub::run(hub, || write_to_parquet(samples, batch_id, &output_dir))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(join_err) => Err(anyhow::anyhow!("parquet write task panicked: {}", join_err)),
+        }
+    });
 }
 
 fn record_write_result(res: Result<Result<()>, tokio::task::JoinError>, write_failures: &mut u32) {
@@ -225,44 +238,29 @@ fn record_write_result(res: Result<Result<()>, tokio::task::JoinError>, write_fa
     }
 }
 
-async fn settle_write_handle(handle: JoinHandle<Result<()>>, write_failures: &mut u32) {
-    record_write_result(handle.await, write_failures);
-}
-
-/// Reap finished handles; if still at capacity, await the oldest (backpressure).
+/// Reap finished writes; if still at capacity, await the next one to finish (backpressure).
 /// Returns `true` if Ctrl+C arrived while waiting so the outer loop can shut down.
-async fn reclaim_in_flight(
-    in_flight: &mut Vec<JoinHandle<Result<()>>>,
-    write_failures: &mut u32,
-) -> bool {
-    let mut i = 0;
-    while i < in_flight.len() {
-        if in_flight[i].is_finished() {
-            let handle = in_flight.remove(i);
-            settle_write_handle(handle, write_failures).await;
-        } else {
-            i += 1;
-        }
+async fn reclaim_in_flight(in_flight: &mut JoinSet<Result<()>>, write_failures: &mut u32) -> bool {
+    while let Some(res) = in_flight.try_join_next() {
+        record_write_result(res, write_failures);
     }
-    while in_flight.len() >= MAX_IN_FLIGHT_WRITES {
-        let mut handle = in_flight.remove(0);
-        tokio::select! {
-            res = &mut handle => {
+    if in_flight.len() < MAX_IN_FLIGHT_WRITES {
+        return false;
+    }
+    tokio::select! {
+        res = in_flight.join_next() => {
+            if let Some(res) = res {
                 record_write_result(res, write_failures);
             }
-            _ = tokio::signal::ctrl_c() => {
-                // Preserve the still-running task for drain_in_flight on shutdown.
-                in_flight.insert(0, handle);
-                return true;
-            }
+            false
         }
+        _ = tokio::signal::ctrl_c() => true,
     }
-    false
 }
 
-async fn drain_in_flight(in_flight: &mut Vec<JoinHandle<Result<()>>>, write_failures: &mut u32) {
-    for handle in in_flight.drain(..) {
-        settle_write_handle(handle, write_failures).await;
+async fn drain_in_flight(in_flight: &mut JoinSet<Result<()>>, write_failures: &mut u32) {
+    while let Some(res) = in_flight.join_next().await {
+        record_write_result(res, write_failures);
     }
 }
 
@@ -281,13 +279,14 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
+    let output_dir = std::env::current_dir()?;
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
     // After write backpressure, do not burst-catch every missed 5ms tick.
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut batch_counter = 0u32;
     let mut cpu_monitor = CpuMonitor::new();
-    let mut in_flight: Vec<JoinHandle<Result<()>>> = Vec::new();
+    let mut in_flight: JoinSet<Result<()>> = JoinSet::new();
     let mut write_failures: u32 = 0;
 
     println!(
@@ -352,6 +351,7 @@ async fn main() -> Result<()> {
                             if let Err(e) = write_to_parquet(
                                 std::mem::take(&mut buffer),
                                 batch_counter,
+                                &output_dir,
                             ) {
                                 write_failures += 1;
                                 let redacted =
@@ -373,14 +373,19 @@ async fn main() -> Result<()> {
                     let samples_to_write =
                         std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
                     batch_counter += 1;
-                    in_flight.push(spawn_parquet_write(samples_to_write, batch_counter));
+                    spawn_parquet_write(
+                        &mut in_flight,
+                        samples_to_write,
+                        batch_counter,
+                        output_dir.clone(),
+                    );
                 }
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutdown signal received. Finalizing last batch...");
                 if !buffer.is_empty() {
                     batch_counter += 1;
-                    if let Err(e) = write_to_parquet(buffer, batch_counter) {
+                    if let Err(e) = write_to_parquet(buffer, batch_counter, &output_dir) {
                         write_failures += 1;
                         let redacted = privacy::redact_personal_path(&format!("{:?}", e));
                         eprintln!("Failed to write final batch: {}", redacted);
@@ -451,16 +456,26 @@ mod tests {
 
     #[test]
     fn write_to_parquet_emits_labeled_batch_file() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gt_parquet_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
         let batch_id = 99_001;
-        let path = format!("gpu_telemetry_v1_batch_{batch_id}.parquet");
+        let path = tmp.join(format!("gpu_telemetry_v2_batch_{batch_id}.parquet"));
         let _ = std::fs::remove_file(&path);
         write_to_parquet(
             vec![sample_fixture("kcd2"), sample_fixture("kcd2")],
             batch_id,
+            &tmp,
         )
         .expect("parquet write");
-        assert!(std::path::Path::new(&path).is_file());
-        let _ = std::fs::remove_file(&path);
+        assert!(path.is_file());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

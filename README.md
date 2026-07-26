@@ -35,12 +35,17 @@ MangoHud (or any overlay) is **not** recorded. You may still run it yourself for
 
 ### 1. Capture a labeled session
 
-Use a clean working directory (or `neuromorphic_data/<session>/`) so batches do not mix.
+Use a dedicated per-session directory so batches from different runs do not overwrite each other.
 
 ```bash
 # Examples: kcd2, re2r, re3r, re_requiem, cp2077, …
-SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry
-SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry
+mkdir -p neuromorphic_data/kcd2 && cd neuromorphic_data/kcd2
+SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
+# Ctrl+C to flush, then cd back for the next session
+cd ../..
+
+mkdir -p neuromorphic_data/re2r && cd neuromorphic_data/re2r
+SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
 ```
 
 Then:
@@ -49,16 +54,16 @@ Then:
 2. Play the session while the collector runs (default poll: **5 ms**, override with `POLL_INTERVAL_MS`).
 3. Ctrl+C to flush the last batch and exit.
 
-Output files:
+Output files (one per directory):
 
-`gpu_telemetry_v1_batch_N.parquet`
+`gpu_telemetry_v2_batch_N.parquet`
 
 ### 2. Export canonical CSV for `corinth-canal`
 
 Stable **5-column** replay schema (unchanged; `session_label` stays in Parquet):
 
 ```bash
-cargo run --bin export_csv -- gpu_telemetry_v1_batch_1.parquet canonical.csv
+cargo run --bin export_csv -- neuromorphic_data/kcd2/gpu_telemetry_v2_batch_1.parquet canonical.csv
 ```
 
 Header:
@@ -70,13 +75,13 @@ Header:
 ### 3. Optional: DuckDB query helper
 
 ```bash
-cargo run --bin query -- gpu_telemetry_v1_batch_1.parquet
+cargo run --bin query -- neuromorphic_data/kcd2/gpu_telemetry_v2_batch_1.parquet
 ```
 
 ## Replay contract
 
 ```text
-collector -> gpu_telemetry_v1_batch_N.parquet -> export_csv -> canonical.csv -> corinth-canal/examples/csv_replay
+collector -> neuromorphic_data/<session>/gpu_telemetry_v2_batch_N.parquet -> export_csv -> canonical.csv -> corinth-canal/examples/csv_replay
 ```
 
 ```bash
