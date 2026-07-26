@@ -456,7 +456,10 @@ mod tests {
 
     #[test]
     fn write_to_parquet_emits_labeled_batch_file() {
-        let tmp = std::env::temp_dir().join(format!(
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-fixtures");
+        let tmp = base.join(format!(
             "gt_parquet_test_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -475,6 +478,17 @@ mod tests {
         )
         .expect("parquet write");
         assert!(path.is_file());
+
+        // Verify the session_label column is written for every row.
+        let df = LazyFrame::scan_parquet(&path, ScanArgsParquet::default())
+            .unwrap()
+            .select(&[col("session_label")])
+            .collect()
+            .unwrap();
+        let labels = df.column("session_label").unwrap().str().unwrap();
+        assert_eq!(labels.len(), 2);
+        assert!(labels.into_iter().all(|opt| opt == Some("kcd2")));
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

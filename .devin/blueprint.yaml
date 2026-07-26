@@ -3,18 +3,20 @@
 # Commands run from the repo root.
 
 initialize: |
-  # System dependencies for duckdb bundled build, NVML C wrappers, and sentry transport.
-  sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev
+  # System dependencies for duckdb bundled build, NVML C wrappers, rustup bootstrap, and sentry transport.
+  sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl pkg-config libssl-dev
   sudo rm -rf /var/lib/apt/lists/*
 
-  # Ensure a stable Rust toolchain with clippy and rustfmt.
+  # Ensure a stable Rust toolchain with clippy and rustfmt; use RUSTUP_TOOLCHAIN so
+  # the repo does not mutate the global default toolchain for other snapshots.
   if ! command -v rustup >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component clippy,rustfmt
     echo "PATH=$HOME/.cargo/bin:$PATH" >> "$ENVRC"
     export PATH="$HOME/.cargo/bin:$PATH"
   fi
-  rustup default stable
-  rustup component add --toolchain stable clippy rustfmt
+  rustup toolchain install stable --component clippy,rustfmt
+  echo 'RUSTUP_TOOLCHAIN=stable' >> "$ENVRC"
+  export RUSTUP_TOOLCHAIN=stable
 
 maintenance: |
   # Pre-warm dependency cache for faster first builds/tests.
