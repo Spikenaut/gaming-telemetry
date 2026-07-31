@@ -10,7 +10,7 @@ use std::env;
 pub fn redact_home(text: &str) -> String {
     if let Some(home) = env::var_os("HOME") {
         let home_str = home.to_string_lossy();
-        if home_str == "/" {
+        if home_str.is_empty() || home_str == "/" {
             return text.to_string();
         }
         return text.replace(home_str.as_ref(), "$HOME");
@@ -30,14 +30,28 @@ pub fn redact_personal_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+
+    struct HomeGuard(Option<OsString>);
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(h) => env::set_var("HOME", h),
+                    None => env::remove_var("HOME"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn redact_home_replaces_prefix() {
-        let home = env::var_os("HOME").unwrap_or_else(|| "/home/test".into());
-        let example = format!(
-            "{}/.local/share/Steam/steamapps/common/Cyberpunk 2077",
-            home.to_string_lossy()
-        );
+        let _guard = HomeGuard(env::var_os("HOME"));
+        let test_home = "/home/testuser";
+        unsafe { env::set_var("HOME", test_home) }
+
+        let example = format!("{test_home}/.local/share/Steam/steamapps/common/Cyberpunk 2077");
         let result = redact_home(&example);
         assert!(
             result.contains("$HOME"),

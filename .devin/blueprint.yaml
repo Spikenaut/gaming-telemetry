@@ -3,8 +3,12 @@
 # Commands run from the repo root.
 
 initialize: |
+  set -e
+  set -o pipefail
+
   # System dependencies for duckdb bundled build, NVML C wrappers, rustup bootstrap, and sentry transport.
-  sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl pkg-config libssl-dev
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl pkg-config libssl-dev
   sudo rm -rf /var/lib/apt/lists/*
 
   # Ensure a stable Rust toolchain with clippy and rustfmt; use RUSTUP_TOOLCHAIN so
@@ -21,18 +25,18 @@ initialize: |
 
 maintenance: |
   # Pre-warm dependency cache for faster first builds/tests.
-  cargo fetch
+  cargo fetch --locked
 
 knowledge:
   - name: lint
     contents: |
-      cargo clippy --all-targets -- -D warnings
+      cargo clippy --locked --all-targets -- -D warnings
   - name: test
     contents: |
-      cargo test
+      cargo test --locked
   - name: build
     contents: |
-      cargo build
+      cargo build --locked
   - name: format
     contents: |
       cargo fmt --check

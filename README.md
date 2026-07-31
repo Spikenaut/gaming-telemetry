@@ -39,12 +39,16 @@ Use a dedicated per-session directory so batches from different runs do not over
 
 ```bash
 # Examples: kcd2, re2r, re3r, re_requiem, cp2077, …
-mkdir -p neuromorphic_data/kcd2_$(date +%Y%m%d_%H%M%S) && cd neuromorphic_data/kcd2_$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S)
+SESSION_DIR="neuromorphic_data/kcd2_${TS}"
+mkdir -p "$SESSION_DIR" && cd "$SESSION_DIR"
 SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
 # Ctrl+C to flush, then cd back for the next session
 cd ../..
 
-mkdir -p neuromorphic_data/re2r_$(date +%Y%m%d_%H%M%S) && cd neuromorphic_data/re2r_$(date +%Y%m%d_%H%M%S)
+TS=$(date +%Y%m%d_%H%M%S)
+RE2R_SESSION_DIR="neuromorphic_data/re2r_${TS}"
+mkdir -p "$RE2R_SESSION_DIR" && cd "$RE2R_SESSION_DIR"
 SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
 ```
 
@@ -58,12 +62,14 @@ Output files (multiple batches per directory):
 
 `gpu_telemetry_v2_batch_N.parquet`
 
+The export and query examples below reuse the `$SESSION_DIR` variable from the capture block you ran. If you used a different directory, substitute its name.
+
 ### 2. Export canonical CSV for `corinth-canal`
 
 Stable **5-column** replay schema (unchanged; `session_label` stays in Parquet):
 
 ```bash
-cargo run --bin export_csv -- neuromorphic_data/kcd2/gpu_telemetry_v2_batch_1.parquet canonical.csv
+cargo run --bin export_csv -- "$SESSION_DIR/gpu_telemetry_v2_batch_1.parquet" canonical.csv
 ```
 
 Header:
@@ -75,7 +81,7 @@ Header:
 ### 3. Optional: DuckDB query helper
 
 ```bash
-cargo run --bin query -- neuromorphic_data/kcd2/gpu_telemetry_v2_batch_1.parquet
+cargo run --bin query -- "$SESSION_DIR/gpu_telemetry_v2_batch_1.parquet"
 ```
 
 ## Replay contract
@@ -99,7 +105,7 @@ For multi-title training mixes, group by Parquet `session_label` (or by folder u
 | Resident Evil 2 Remake | `re2r` |
 | Resident Evil 3 Remake | `re3r` |
 | Resident Evil Requiem | `re_requiem` |
-| Cyberpunk 2077 (optional) | `cp2077` |
+| Cyberpunk 2077 | `cp2077` |
 
 Max settings only. No install path is required by this repo.
 
