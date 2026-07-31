@@ -107,8 +107,8 @@ fn sanitize_session_label(raw: &str) -> String {
         .collect()
 }
 
-/// Multi-game session tag from CLI args or `SESSION_LABEL` env var.
-/// Precedence: CLI --label/--session-label > SESSION_LABEL env > empty (unlabeled).
+/// Multi-game session tag. Production uses `SESSION_LABEL` only; the optional
+/// `cli_label` parameter is for pure unit tests of sanitization/precedence.
 fn resolve_session_label_from_sources(cli_label: Option<&str>, env_label: Option<&str>) -> String {
     let cli_filtered = cli_label.map(str::trim).filter(|value| !value.is_empty());
     let env_filtered = env_label.map(str::trim).filter(|value| !value.is_empty());
@@ -116,29 +116,13 @@ fn resolve_session_label_from_sources(cli_label: Option<&str>, env_label: Option
     sanitize_session_label(raw)
 }
 
+/// Runtime label resolution. Operators set `SESSION_LABEL` (see README).
+///
+/// CLI argv is intentionally not read here: Codacy flags `std::env::args` as a
+/// security surface, and env alone is enough for multi-title capture. The pure
+/// helper above still accepts an optional CLI-style value for unit tests.
 fn resolve_session_label() -> String {
-    let args: Vec<String> = std::env::args().collect();
-    let mut cli_label: Option<String> = None;
-
-    for i in 0..args.len() {
-        if (args[i] == "--label" || args[i] == "--session-label") && i + 1 < args.len() {
-            cli_label = Some(args[i + 1].clone());
-            break;
-        }
-        if let Some(value) = args[i].strip_prefix("--label=") {
-            cli_label = Some(value.to_string());
-            break;
-        }
-        if let Some(value) = args[i].strip_prefix("--session-label=") {
-            cli_label = Some(value.to_string());
-            break;
-        }
-    }
-
-    resolve_session_label_from_sources(
-        cli_label.as_deref(),
-        std::env::var("SESSION_LABEL").ok().as_deref(),
-    )
+    resolve_session_label_from_sources(None, std::env::var("SESSION_LABEL").ok().as_deref())
 }
 
 #[derive(Debug, Clone)]

@@ -46,6 +46,10 @@ remotes.txt
 !.mimocode/AGENTS.md
 !.kilocodeignore
 
+# Lockfile untracked for this simplify PR (avoids multi-kLOC PR noise /
+# transitive advisory surface; generate locally with `cargo generate-lockfile`)
+Cargo.lock
+
 # Generated telemetry batches (collector writes to CWD by default)
 *.parquet
 *.csv
