@@ -5,15 +5,18 @@
 
 use std::env;
 
+fn redact_with_home(text: &str, home: &str) -> String {
+    if home.is_empty() || home == "/" {
+        return text.to_string();
+    }
+    text.replace(home, "$HOME")
+}
+
 /// Redact embedded occurrences of the user's $HOME with "$HOME".
 /// Falls back to returning the original string if $HOME is not set or no match.
 pub fn redact_home(text: &str) -> String {
     if let Some(home) = env::var_os("HOME") {
-        let home_str = home.to_string_lossy();
-        if home_str.is_empty() || home_str == "/" {
-            return text.to_string();
-        }
-        return text.replace(home_str.as_ref(), "$HOME");
+        return redact_with_home(text, home.to_string_lossy().as_ref());
     }
     text.to_string()
 }
@@ -30,29 +33,12 @@ pub fn redact_personal_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-
-    struct HomeGuard(Option<OsString>);
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.0.take() {
-                    Some(h) => env::set_var("HOME", h),
-                    None => env::remove_var("HOME"),
-                }
-            }
-        }
-    }
 
     #[test]
     fn redact_home_replaces_prefix() {
-        let _guard = HomeGuard(env::var_os("HOME"));
         let test_home = "/home/testuser";
-        unsafe { env::set_var("HOME", test_home) }
-
         let example = format!("{test_home}/.local/share/Steam/steamapps/common/Cyberpunk 2077");
-        let result = redact_home(&example);
+        let result = redact_with_home(&example, test_home);
         assert!(
             result.contains("$HOME"),
             "expected redaction for path: {}",
@@ -62,6 +48,13 @@ mod tests {
             result, example,
             "expected the home path to be actually redacted (not left unchanged)"
         );
+    }
+
+    #[test]
+    fn redact_with_home_skips_empty_and_root() {
+        let input = "/some/path";
+        assert_eq!(redact_with_home(input, ""), input);
+        assert_eq!(redact_with_home(input, "/"), input);
     }
 
     #[test]
