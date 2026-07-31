@@ -5,23 +5,17 @@
 
 use std::env;
 
-/// Redact occurrences of the user's $HOME (or a provided base) with "$HOME".
+/// Redact embedded occurrences of the user's $HOME with "$HOME".
 /// Falls back to returning the original string if $HOME is not set or no match.
-pub fn redact_home(path: &str) -> String {
+pub fn redact_home(text: &str) -> String {
     if let Some(home) = env::var_os("HOME") {
-        let home_path = std::path::Path::new(&home);
-        if home_path == std::path::Path::new("/") {
-            return path.to_string();
+        let home_str = home.to_string_lossy();
+        if home_str == "/" {
+            return text.to_string();
         }
-        let input_path = std::path::Path::new(path);
-        if let Ok(stripped) = input_path.strip_prefix(home_path) {
-            if stripped.as_os_str().is_empty() {
-                return "$HOME".to_string();
-            }
-            return format!("$HOME/{}", stripped.to_string_lossy());
-        }
+        return text.replace(home_str.as_ref(), "$HOME");
     }
-    path.to_string()
+    text.to_string()
 }
 
 /// Redact common personal base paths (home, and placeholders for future Steam/Proton

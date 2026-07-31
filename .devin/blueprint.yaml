@@ -13,8 +13,9 @@ initialize: |
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --component clippy,rustfmt
     echo "PATH=$HOME/.cargo/bin:$PATH" >> "$ENVRC"
     export PATH="$HOME/.cargo/bin:$PATH"
+  else
+    rustup toolchain install stable --component clippy,rustfmt
   fi
-  rustup toolchain install stable --component clippy,rustfmt
   echo 'RUSTUP_TOOLCHAIN=stable' >> "$ENVRC"
   export RUSTUP_TOOLCHAIN=stable
 

@@ -39,12 +39,12 @@ Use a dedicated per-session directory so batches from different runs do not over
 
 ```bash
 # Examples: kcd2, re2r, re3r, re_requiem, cp2077, …
-mkdir -p neuromorphic_data/kcd2 && cd neuromorphic_data/kcd2
+mkdir -p neuromorphic_data/kcd2_$(date +%Y%m%d_%H%M%S) && cd neuromorphic_data/kcd2_$(date +%Y%m%d_%H%M%S)
 SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
 # Ctrl+C to flush, then cd back for the next session
 cd ../..
 
-mkdir -p neuromorphic_data/re2r && cd neuromorphic_data/re2r
+mkdir -p neuromorphic_data/re2r_$(date +%Y%m%d_%H%M%S) && cd neuromorphic_data/re2r_$(date +%Y%m%d_%H%M%S)
 SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
 ```
 
@@ -54,7 +54,7 @@ Then:
 2. Play the session while the collector runs (default poll: **5 ms**, override with `POLL_INTERVAL_MS`).
 3. Ctrl+C to flush the last batch and exit.
 
-Output files (one per directory):
+Output files (multiple batches per directory):
 
 `gpu_telemetry_v2_batch_N.parquet`
 

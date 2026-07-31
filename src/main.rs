@@ -107,18 +107,38 @@ fn sanitize_session_label(raw: &str) -> String {
         .collect()
 }
 
-/// Multi-game session tag from `SESSION_LABEL` only (no argv parsing).
-/// Default empty = unlabeled.
-fn resolve_session_label_from_env(env_label: Option<&str>) -> String {
-    let raw = env_label
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("");
+/// Multi-game session tag from CLI args or `SESSION_LABEL` env var.
+/// Precedence: CLI --label/--session-label > SESSION_LABEL env > empty (unlabeled).
+fn resolve_session_label_from_sources(cli_label: Option<&str>, env_label: Option<&str>) -> String {
+    let cli_filtered = cli_label.map(str::trim).filter(|value| !value.is_empty());
+    let env_filtered = env_label.map(str::trim).filter(|value| !value.is_empty());
+    let raw = cli_filtered.or(env_filtered).unwrap_or("");
     sanitize_session_label(raw)
 }
 
 fn resolve_session_label() -> String {
-    resolve_session_label_from_env(std::env::var("SESSION_LABEL").ok().as_deref())
+    let args: Vec<String> = std::env::args().collect();
+    let mut cli_label: Option<String> = None;
+
+    for i in 0..args.len() {
+        if (args[i] == "--label" || args[i] == "--session-label") && i + 1 < args.len() {
+            cli_label = Some(args[i + 1].clone());
+            break;
+        }
+        if let Some(value) = args[i].strip_prefix("--label=") {
+            cli_label = Some(value.to_string());
+            break;
+        }
+        if let Some(value) = args[i].strip_prefix("--session-label=") {
+            cli_label = Some(value.to_string());
+            break;
+        }
+    }
+
+    resolve_session_label_from_sources(
+        cli_label.as_deref(),
+        std::env::var("SESSION_LABEL").ok().as_deref(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +284,30 @@ async fn drain_in_flight(in_flight: &mut JoinSet<Result<()>>, write_failures: &m
     }
 }
 
+async fn perform_shutdown(
+    buffer: Vec<GpuSample>,
+    batch_counter: u32,
+    output_dir: &Path,
+    in_flight: &mut JoinSet<Result<()>>,
+    write_failures: &mut u32,
+) -> Result<()> {
+    if !buffer.is_empty() {
+        let new_batch_id = batch_counter + 1;
+        if let Err(e) = write_to_parquet(buffer, new_batch_id, output_dir) {
+            *write_failures += 1;
+            let redacted = privacy::redact_personal_path(&format!("{:?}", e));
+            eprintln!("Failed to write final batch: {}", redacted);
+            sentry::capture_message(&redacted, sentry::Level::Error);
+        }
+    }
+    drain_in_flight(in_flight, write_failures).await;
+    if *write_failures > 0 {
+        anyhow::bail!("Graceful shutdown finished with {write_failures} parquet write failure(s)");
+    }
+    println!("Graceful shutdown complete.");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _sentry_guard = init_sentry();
@@ -345,29 +389,14 @@ async fn main() -> Result<()> {
 
                 if buffer.len() >= BUFFER_SIZE {
                     if reclaim_in_flight(&mut in_flight, &mut write_failures).await {
-                        // Ctrl+C while waiting for disk; fall through to shared shutdown.
-                        if !buffer.is_empty() {
-                            batch_counter += 1;
-                            if let Err(e) = write_to_parquet(
-                                std::mem::take(&mut buffer),
-                                batch_counter,
-                                &output_dir,
-                            ) {
-                                write_failures += 1;
-                                let redacted =
-                                    privacy::redact_personal_path(&format!("{:?}", e));
-                                eprintln!("Failed to write final batch: {}", redacted);
-                                sentry::capture_message(&redacted, sentry::Level::Error);
-                            }
-                        }
                         println!("\nShutdown signal received during write backpressure...");
-                        drain_in_flight(&mut in_flight, &mut write_failures).await;
-                        if write_failures > 0 {
-                            anyhow::bail!(
-                                "Graceful shutdown finished with {write_failures} parquet write failure(s)"
-                            );
-                        }
-                        println!("Graceful shutdown complete.");
+                        perform_shutdown(
+                            std::mem::take(&mut buffer),
+                            batch_counter,
+                            &output_dir,
+                            &mut in_flight,
+                            &mut write_failures,
+                        ).await?;
                         break;
                     }
                     let samples_to_write =
@@ -383,22 +412,13 @@ async fn main() -> Result<()> {
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutdown signal received. Finalizing last batch...");
-                if !buffer.is_empty() {
-                    batch_counter += 1;
-                    if let Err(e) = write_to_parquet(buffer, batch_counter, &output_dir) {
-                        write_failures += 1;
-                        let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-                        eprintln!("Failed to write final batch: {}", redacted);
-                        sentry::capture_message(&redacted, sentry::Level::Error);
-                    }
-                }
-                drain_in_flight(&mut in_flight, &mut write_failures).await;
-                if write_failures > 0 {
-                    anyhow::bail!(
-                        "Graceful shutdown finished with {write_failures} parquet write failure(s)"
-                    );
-                }
-                println!("Graceful shutdown complete.");
+                perform_shutdown(
+                    buffer,
+                    batch_counter,
+                    &output_dir,
+                    &mut in_flight,
+                    &mut write_failures,
+                ).await?;
                 break;
             }
         }
@@ -412,18 +432,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_session_label_from_env_sanitizes() {
-        // Pure helper tests — no process env mutation (avoids races under cargo test).
-        assert_eq!(resolve_session_label_from_env(None), "");
-        assert_eq!(resolve_session_label_from_env(Some("")), "");
-        assert_eq!(resolve_session_label_from_env(Some("  kcd2  ")), "kcd2");
+    fn resolve_session_label_from_sources_sanitizes() {
+        assert_eq!(resolve_session_label_from_sources(None, None), "");
+        assert_eq!(resolve_session_label_from_sources(None, Some("")), "");
         assert_eq!(
-            resolve_session_label_from_env(Some("re_requiem")),
+            resolve_session_label_from_sources(None, Some("  kcd2  ")),
+            "kcd2"
+        );
+        assert_eq!(
+            resolve_session_label_from_sources(None, Some("re_requiem")),
             "re_requiem"
         );
         assert_eq!(
-            resolve_session_label_from_env(Some("kcd2;rm -rf /")),
+            resolve_session_label_from_sources(None, Some("kcd2;rm -rf /")),
             "kcd2rm-rf"
+        );
+        assert_eq!(
+            resolve_session_label_from_sources(Some("cli_label"), Some("env_label")),
+            "cli_label",
+            "CLI label should take precedence over env"
+        );
+        assert_eq!(
+            resolve_session_label_from_sources(Some(""), Some("env_label")),
+            "env_label",
+            "Empty CLI label should fallback to env"
         );
         let long = "a".repeat(80);
         assert_eq!(sanitize_session_label(&long).len(), 64);
