@@ -22,8 +22,9 @@ fn main() -> Result<()> {
 
     // Basic stats
     println!("\n[Summary Statistics]");
-    let mut stmt = conn.prepare(&format!(
-        "SELECT
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT
             avg(power_usage_mw) as avg_power,
             max(power_usage_mw) as max_power,
             avg(temperature_c) as avg_temp,
@@ -31,7 +32,6 @@ fn main() -> Result<()> {
             max(pcie_tx_kbps) as max_pcie_tx,
             avg(encoder_util_perc) as avg_enc,
             avg(decoder_util_perc) as avg_dec,
-            sum(CASE WHEN mangohud_active THEN 1 ELSE 0 END) * 100.0 / count(*) as mangohud_presence_pct,
             count(*) as sample_count,
             avg(cpu_tctl_c) as avg_cpu_temp,
             max(cpu_tctl_c) as max_cpu_temp,
@@ -40,8 +40,14 @@ fn main() -> Result<()> {
             avg(cpu_ccd2_c) as avg_cpu_ccd2,
             max(cpu_ccd2_c) as max_cpu_ccd2
          FROM read_parquet('{}')",
-        parquet_file_sql
-    )).with_context(|| format!("Failed to prepare summary statistics query for {}", parquet_file_display))?;
+            parquet_file_sql
+        ))
+        .with_context(|| {
+            format!(
+                "Failed to prepare summary statistics query for {}",
+                parquet_file_display
+            )
+        })?;
 
     let mut rows = stmt.query([]).with_context(|| {
         format!(
@@ -57,14 +63,13 @@ fn main() -> Result<()> {
         let max_tx: u32 = row.get(4)?;
         let avg_enc: f64 = row.get(5)?;
         let avg_dec: f64 = row.get(6)?;
-        let mangohud_pct: f64 = row.get(7)?;
-        let count: i64 = row.get(8)?;
-        let avg_cpu_temp: f64 = row.get(9)?;
-        let max_cpu_temp: f64 = row.get(10)?;
-        let avg_cpu_ccd1: f64 = row.get(11)?;
-        let max_cpu_ccd1: f64 = row.get(12)?;
-        let avg_cpu_ccd2: f64 = row.get(13)?;
-        let max_cpu_ccd2: f64 = row.get(14)?;
+        let count: i64 = row.get(7)?;
+        let avg_cpu_temp: f64 = row.get(8)?;
+        let max_cpu_temp: f64 = row.get(9)?;
+        let avg_cpu_ccd1: f64 = row.get(10)?;
+        let max_cpu_ccd1: f64 = row.get(11)?;
+        let avg_cpu_ccd2: f64 = row.get(12)?;
+        let max_cpu_ccd2: f64 = row.get(13)?;
 
         println!("Samples: {}", count);
         println!("Avg Power: {:.2} W", avg_power / 1000.0);
@@ -74,7 +79,6 @@ fn main() -> Result<()> {
         println!("Max PCIe TX: {:.2} MB/s", max_tx as f64 / 1024.0);
         println!("Avg Encoder: {:.1}%", avg_enc);
         println!("Avg Decoder: {:.1}%", avg_dec);
-        println!("MangoHud Active: {:.1}% of samples", mangohud_pct);
         println!("\n--- CPU Telemetry ---");
         println!("Avg CPU Temp (Tctl): {:.1} C", avg_cpu_temp);
         println!("Max CPU Temp (Tctl): {:.1} C", max_cpu_temp);

@@ -1,6 +1,55 @@
-/target
-**/*.rs.bk
+# AI Tool Local/Ephemeral (no clutter)
+.kilo/worktrees/
+.kilo/*.json
+.devin/cache/
+.mimocode/auth.json
+.mimocode/plans/
+.worktrees/
+.swarm/
+.beads/
+.cline/
+.claude/
+.codex/
+.opencode/
+docs/superpowers/
+
+# Compiled output
+/target/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+.cursor/
+.cursorignore
+.zed/
+
+# Standard dev + your data
+node_modules/
+dist/
+build/
+*.log
+.env*
+*.env
+__pycache__/
+.cache/
+.DS_Store
+neuromorphic_data/
+remotes.txt
+
+# Negations: Force-commit the good stuff
+!.kilo/skills/**
+!.kilo/tui.jsonc
+!.devin/blueprint.yaml
+!.mimocode/mimocode.jsonc
+!.mimocode/AGENTS.md
+!.kilocodeignore
+
+# Lockfile untracked for this simplify PR (avoids multi-kLOC PR noise /
+# transitive advisory surface; generate locally with `cargo generate-lockfile`)
 Cargo.lock
 
-# Parquet files (telemetry data)
+# Generated telemetry batches (collector writes to CWD by default)
 *.parquet
+*.csv

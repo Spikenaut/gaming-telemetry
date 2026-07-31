@@ -10,9 +10,10 @@ use polars::prelude::*;
 use sentry::ClientInitGuard;
 use std::borrow::Cow;
 use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
-use tokio::time::{interval, Duration};
+use tokio::task::JoinSet;
+use tokio::time::{interval, Duration, MissedTickBehavior};
 
 fn git_sha() -> String {
     if let Some(value) = std::env::var("AGENTOS_GIT_SHA")
@@ -98,9 +99,36 @@ fn init_sentry() -> Option<ClientInitGuard> {
     Some(guard)
 }
 
+/// Keep session tags as short ASCII identifiers (labels only — never used for paths/exec).
+fn sanitize_session_label(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(64)
+        .collect()
+}
+
+/// Multi-game session tag. Production uses `SESSION_LABEL` only; the optional
+/// `cli_label` parameter is for pure unit tests of sanitization/precedence.
+fn resolve_session_label_from_sources(cli_label: Option<&str>, env_label: Option<&str>) -> String {
+    let cli_filtered = cli_label.map(str::trim).filter(|value| !value.is_empty());
+    let env_filtered = env_label.map(str::trim).filter(|value| !value.is_empty());
+    let raw = cli_filtered.or(env_filtered).unwrap_or("");
+    sanitize_session_label(raw)
+}
+
+/// Runtime label resolution. Operators set `SESSION_LABEL` (see README).
+///
+/// CLI argv is intentionally not read here: Codacy flags `std::env::args` as a
+/// security surface, and env alone is enough for multi-title capture. The pure
+/// helper above still accepts an optional CLI-style value for unit tests.
+fn resolve_session_label() -> String {
+    resolve_session_label_from_sources(None, std::env::var("SESSION_LABEL").ok().as_deref())
+}
+
 #[derive(Debug, Clone)]
 struct GpuSample {
     timestamp: DateTime<Utc>,
+    session_label: String,
     power_usage_mw: u32,
     temperature_c: u32,
     graphics_clock_mhz: u32,
@@ -114,7 +142,6 @@ struct GpuSample {
     memory_total_mb: u64,
     encoder_util_perc: u32,
     decoder_util_perc: u32,
-    mangohud_active: bool,
     // CPU telemetry
     cpu_tctl_c: f32,
     cpu_ccd1_c: f32,
@@ -123,12 +150,15 @@ struct GpuSample {
 }
 
 const BUFFER_SIZE: usize = 2000; // ~10 seconds of data at default 5ms intervals
+/// Cap outstanding async Parquet writes so a slow disk cannot queue unbounded batches.
+const MAX_IN_FLIGHT_WRITES: usize = 2;
 
-fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
+fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -> Result<()> {
     let timestamps: Vec<i64> = samples
         .iter()
         .map(|s| s.timestamp.timestamp_millis())
         .collect();
+    let session_labels: Vec<String> = samples.iter().map(|s| s.session_label.clone()).collect();
     let power: Vec<u32> = samples.iter().map(|s| s.power_usage_mw).collect();
     let temp: Vec<u32> = samples.iter().map(|s| s.temperature_c).collect();
     let graphics_clock: Vec<u32> = samples.iter().map(|s| s.graphics_clock_mhz).collect();
@@ -142,7 +172,6 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
     let mem_total: Vec<u64> = samples.iter().map(|s| s.memory_total_mb).collect();
     let enc_util: Vec<u32> = samples.iter().map(|s| s.encoder_util_perc).collect();
     let dec_util: Vec<u32> = samples.iter().map(|s| s.decoder_util_perc).collect();
-    let mangohud: Vec<bool> = samples.iter().map(|s| s.mangohud_active).collect();
     let cpu_tctl: Vec<f32> = samples.iter().map(|s| s.cpu_tctl_c).collect();
     let cpu_ccd1: Vec<f32> = samples.iter().map(|s| s.cpu_ccd1_c).collect();
     let cpu_ccd2: Vec<f32> = samples.iter().map(|s| s.cpu_ccd2_c).collect();
@@ -150,6 +179,7 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
 
     let mut df = df!(
         "timestamp_ms" => timestamps,
+        "session_label" => session_labels,
         "power_usage_mw" => power,
         "temperature_c" => temp,
         "graphics_clock_mhz" => graphics_clock,
@@ -163,35 +193,112 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32) -> Result<()> {
         "memory_total_mb" => mem_total,
         "encoder_util_perc" => enc_util,
         "decoder_util_perc" => dec_util,
-        "mangohud_active" => mangohud,
         "cpu_tctl_c" => cpu_tctl,
         "cpu_ccd1_c" => cpu_ccd1,
         "cpu_ccd2_c" => cpu_ccd2,
         "cpu_package_power_w" => cpu_power,
     )?;
 
-    let filename = format!("gpu_telemetry_v1_batch_{}.parquet", batch_id);
+    let filename = output_dir.join(format!("gpu_telemetry_v2_batch_{}.parquet", batch_id));
     let file = File::create(&filename)?;
     ParquetWriter::new(file).finish(&mut df)?;
 
-    println!("Wrote batch {} to {}", batch_id, filename);
+    println!("Wrote batch {} to {}", batch_id, filename.display());
     Ok(())
 }
 
-fn is_mangohud_running() -> bool {
-    Command::new("pgrep")
-        .arg("-x")
-        .arg("mangohud")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn spawn_parquet_write(
+    in_flight: &mut JoinSet<Result<()>>,
+    samples: Vec<GpuSample>,
+    batch_id: u32,
+    output_dir: PathBuf,
+) {
+    let hub = sentry::Hub::current();
+    in_flight.spawn(async move {
+        match tokio::task::spawn_blocking(move || {
+            sentry::Hub::run(hub, || write_to_parquet(samples, batch_id, &output_dir))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(join_err) => Err(anyhow::anyhow!("parquet write task panicked: {}", join_err)),
+        }
+    });
+}
+
+fn record_write_result(res: Result<Result<()>, tokio::task::JoinError>, write_failures: &mut u32) {
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            *write_failures += 1;
+            let redacted = privacy::redact_personal_path(&format!("{:?}", e));
+            eprintln!("Failed to write to Parquet: {}", redacted);
+            sentry::capture_message(&redacted, sentry::Level::Error);
+        }
+        Err(e) => {
+            *write_failures += 1;
+            eprintln!("In-flight parquet write task failed: {}", e);
+        }
+    }
+}
+
+/// Reap finished writes; if still at capacity, await the next one to finish (backpressure).
+/// Returns `true` if Ctrl+C arrived while waiting so the outer loop can shut down.
+async fn reclaim_in_flight(in_flight: &mut JoinSet<Result<()>>, write_failures: &mut u32) -> bool {
+    while let Some(res) = in_flight.try_join_next() {
+        record_write_result(res, write_failures);
+    }
+    if in_flight.len() < MAX_IN_FLIGHT_WRITES {
+        return false;
+    }
+    tokio::select! {
+        res = in_flight.join_next() => {
+            if let Some(res) = res {
+                record_write_result(res, write_failures);
+            }
+            false
+        }
+        _ = tokio::signal::ctrl_c() => true,
+    }
+}
+
+async fn drain_in_flight(in_flight: &mut JoinSet<Result<()>>, write_failures: &mut u32) {
+    while let Some(res) = in_flight.join_next().await {
+        record_write_result(res, write_failures);
+    }
+}
+
+async fn perform_shutdown(
+    buffer: Vec<GpuSample>,
+    batch_counter: u32,
+    output_dir: &Path,
+    in_flight: &mut JoinSet<Result<()>>,
+    write_failures: &mut u32,
+) -> Result<()> {
+    if !buffer.is_empty() {
+        let new_batch_id = batch_counter + 1;
+        if let Err(e) = write_to_parquet(buffer, new_batch_id, output_dir) {
+            *write_failures += 1;
+            let redacted = privacy::redact_personal_path(&format!("{:?}", e));
+            eprintln!("Failed to write final batch: {}", redacted);
+            sentry::capture_message(&redacted, sentry::Level::Error);
+        }
+    }
+    drain_in_flight(in_flight, write_failures).await;
+    if *write_failures > 0 {
+        anyhow::bail!("Graceful shutdown finished with {write_failures} parquet write failure(s)");
+    }
+    println!("Graceful shutdown complete.");
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let _sentry_guard = init_sentry();
 
-    let nvml = Arc::new(Nvml::init()?);
+    let session_label = resolve_session_label();
+
+    let nvml = Nvml::init()?;
     let device = nvml.device_by_index(0)?; // Target first GPU
 
     // Configurable poll interval via environment variable
@@ -200,14 +307,19 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
+    let output_dir = std::env::current_dir()?;
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
-    let mut batch_counter = 0;
+    // After write backpressure, do not burst-catch every missed 5ms tick.
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut batch_counter = 0u32;
     let mut cpu_monitor = CpuMonitor::new();
+    let mut in_flight: JoinSet<Result<()>> = JoinSet::new();
+    let mut write_failures: u32 = 0;
 
     println!(
-        "Starting enhanced GPU telemetry polling every {}ms...",
-        poll_interval_ms
+        "Starting GPU telemetry: poll_interval_ms={} session_label={:?}",
+        poll_interval_ms, session_label
     );
     println!("Press Ctrl+C to stop gracefully.");
 
@@ -230,9 +342,6 @@ async fn main() -> Result<()> {
                 let encoder_util = device.encoder_utilization().map(|u| u.utilization).unwrap_or(0);
                 let decoder_util = device.decoder_utilization().map(|u| u.utilization).unwrap_or(0);
 
-                // MangoHud integration
-                let mangohud_active = is_mangohud_running();
-
                 // CPU telemetry (poll for time-delta power calculation)
                 let (cpu_tctl_c, cpu_package_power_w) = cpu_monitor.poll();
                 let cpu_ccd1_c = cpu_monitor.read_ccd1();
@@ -240,6 +349,7 @@ async fn main() -> Result<()> {
 
                 let sample = GpuSample {
                     timestamp: Utc::now(),
+                    session_label: session_label.clone(),
                     power_usage_mw: power_usage,
                     temperature_c: temperature,
                     graphics_clock_mhz: graphics_clock,
@@ -253,7 +363,6 @@ async fn main() -> Result<()> {
                     memory_total_mb: mem_info.as_ref().map(|m| m.total / 1024 / 1024).unwrap_or(0),
                     encoder_util_perc: encoder_util,
                     decoder_util_perc: decoder_util,
-                    mangohud_active,
                     cpu_tctl_c,
                     cpu_ccd1_c,
                     cpu_ccd2_c,
@@ -263,37 +372,37 @@ async fn main() -> Result<()> {
                 buffer.push(sample);
 
                 if buffer.len() >= BUFFER_SIZE {
-                    let samples_to_write = std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
+                    if reclaim_in_flight(&mut in_flight, &mut write_failures).await {
+                        println!("\nShutdown signal received during write backpressure...");
+                        perform_shutdown(
+                            std::mem::take(&mut buffer),
+                            batch_counter,
+                            &output_dir,
+                            &mut in_flight,
+                            &mut write_failures,
+                        ).await?;
+                        break;
+                    }
+                    let samples_to_write =
+                        std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
                     batch_counter += 1;
-
-                    // Write asynchronously using spawn_blocking to avoid blocking the async runtime.
-                    // Bind Sentry hub so captures in the blocking task are associated (per Sentry async guidance).
-                    let hub = sentry::Hub::current();
-                    tokio::task::spawn_blocking(move || {
-                        sentry::Hub::run(hub, || {
-                            if let Err(e) = write_to_parquet(samples_to_write, batch_counter) {
-                                let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-                                eprintln!("Failed to write to Parquet: {}", redacted);
-                                // Redact error text before sending to Sentry (addresses Coderabbit P1 on
-                                // potential PII in I/O error messages). Also makes `mod privacy` used from
-                                // production code paths in main.rs.
-                                sentry::capture_message(&redacted, sentry::Level::Error);
-                            }
-                        });
-                    });
+                    spawn_parquet_write(
+                        &mut in_flight,
+                        samples_to_write,
+                        batch_counter,
+                        output_dir.clone(),
+                    );
                 }
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("\nShutdown signal received. Finalizing last batch...");
-                if !buffer.is_empty() {
-                    batch_counter += 1;
-                    if let Err(e) = write_to_parquet(buffer, batch_counter) {
-                        let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-                        eprintln!("Failed to write final batch: {}", redacted);
-                        sentry::capture_message(&redacted, sentry::Level::Error);
-                    }
-                }
-                println!("Graceful shutdown complete.");
+                perform_shutdown(
+                    buffer,
+                    batch_counter,
+                    &output_dir,
+                    &mut in_flight,
+                    &mut write_failures,
+                ).await?;
                 break;
             }
         }
@@ -305,6 +414,109 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_session_label_from_sources_sanitizes() {
+        assert_eq!(resolve_session_label_from_sources(None, None), "");
+        assert_eq!(resolve_session_label_from_sources(None, Some("")), "");
+        assert_eq!(
+            resolve_session_label_from_sources(None, Some("  kcd2  ")),
+            "kcd2"
+        );
+        assert_eq!(
+            resolve_session_label_from_sources(None, Some("re_requiem")),
+            "re_requiem"
+        );
+        assert_eq!(
+            resolve_session_label_from_sources(None, Some("kcd2;rm -rf /")),
+            "kcd2rm-rf"
+        );
+        assert_eq!(
+            resolve_session_label_from_sources(Some("cli_label"), Some("env_label")),
+            "cli_label",
+            "CLI label should take precedence over env"
+        );
+        assert_eq!(
+            resolve_session_label_from_sources(Some(""), Some("env_label")),
+            "env_label",
+            "Empty CLI label should fallback to env"
+        );
+        let long = "a".repeat(80);
+        assert_eq!(sanitize_session_label(&long).len(), 64);
+        assert_eq!(sanitize_session_label("...ok"), "...ok");
+    }
+
+    fn sample_fixture(label: &str) -> GpuSample {
+        GpuSample {
+            timestamp: Utc::now(),
+            session_label: label.to_owned(),
+            power_usage_mw: 120_000,
+            temperature_c: 65,
+            graphics_clock_mhz: 2500,
+            memory_clock_mhz: 10000,
+            pcie_rx_throughput_kbps: 100,
+            pcie_tx_throughput_kbps: 50,
+            pstate: 0,
+            throttle_reasons: 0,
+            fan_speed_perc: 40,
+            memory_used_mb: 8_000,
+            memory_total_mb: 16_000,
+            encoder_util_perc: 0,
+            decoder_util_perc: 0,
+            cpu_tctl_c: 55.0,
+            cpu_ccd1_c: 50.0,
+            cpu_ccd2_c: 51.0,
+            cpu_package_power_w: 80.0,
+        }
+    }
+
+    #[test]
+    fn write_to_parquet_emits_labeled_batch_file() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-fixtures");
+        let tmp = base.join(format!(
+            "gt_parquet_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let batch_id = 99_001;
+        let path = tmp.join(format!("gpu_telemetry_v2_batch_{batch_id}.parquet"));
+        let _ = std::fs::remove_file(&path);
+        write_to_parquet(
+            vec![sample_fixture("kcd2"), sample_fixture("kcd2")],
+            batch_id,
+            &tmp,
+        )
+        .expect("parquet write");
+        assert!(path.is_file());
+
+        // Verify the session_label column is written for every row.
+        let df = LazyFrame::scan_parquet(&path, ScanArgsParquet::default())
+            .unwrap()
+            .select(&[col("session_label")])
+            .collect()
+            .unwrap();
+        let labels = df.column("session_label").unwrap().str().unwrap();
+        assert_eq!(labels.len(), 2);
+        assert!(labels.into_iter().all(|opt| opt == Some("kcd2")));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn record_write_result_counts_io_failures() {
+        let mut fails = 0u32;
+        record_write_result(Ok(Ok(())), &mut fails);
+        assert_eq!(fails, 0);
+        record_write_result(Ok(Err(anyhow::anyhow!("disk full"))), &mut fails);
+        assert_eq!(fails, 1);
+        // JoinError is hard to construct without panicking a task; skip Err arm here.
+    }
 
     #[test]
     fn test_sentry_helpers_env_resolution_and_init() {

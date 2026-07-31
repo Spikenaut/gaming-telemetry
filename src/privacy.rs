@@ -1,28 +1,24 @@
 //! Privacy utilities for path redaction and safe handling.
 //!
-//! Goal (per #7 / #14): ensure the project (especially future CP2077 verify tooling
-//! and any reports) never leaks operator home directories, Steam paths, Proton
-//! prefixes, or other personal data by default.
+//! Used for error logs and query display so absolute home paths are not echoed
+//! by default. The collector never walks `$HOME` / Steam / Proton.
 
 use std::env;
 
-/// Redact occurrences of the user's $HOME (or a provided base) with "$HOME".
-/// Falls back to returning the original string if $HOME is not set or no match.
-pub fn redact_home(path: &str) -> String {
-    if let Some(home) = env::var_os("HOME") {
-        let home_path = std::path::Path::new(&home);
-        if home_path == std::path::Path::new("/") {
-            return path.to_string();
-        }
-        let input_path = std::path::Path::new(path);
-        if let Ok(stripped) = input_path.strip_prefix(home_path) {
-            if stripped.as_os_str().is_empty() {
-                return "$HOME".to_string();
-            }
-            return format!("$HOME/{}", stripped.to_string_lossy());
-        }
+fn redact_with_home(text: &str, home: &str) -> String {
+    if home.is_empty() || home == "/" {
+        return text.to_string();
     }
-    path.to_string()
+    text.replace(home, "$HOME")
+}
+
+/// Redact embedded occurrences of the user's $HOME with "$HOME".
+/// Falls back to returning the original string if $HOME is not set or no match.
+pub fn redact_home(text: &str) -> String {
+    if let Some(home) = env::var_os("HOME") {
+        return redact_with_home(text, home.to_string_lossy().as_ref());
+    }
+    text.to_string()
 }
 
 /// Redact common personal base paths (home, and placeholders for future Steam/Proton
@@ -40,12 +36,9 @@ mod tests {
 
     #[test]
     fn redact_home_replaces_prefix() {
-        let home = env::var_os("HOME").unwrap_or_else(|| "/home/test".into());
-        let example = format!(
-            "{}/.local/share/Steam/steamapps/common/Cyberpunk 2077",
-            home.to_string_lossy()
-        );
-        let result = redact_home(&example);
+        let test_home = "/home/testuser";
+        let example = format!("{test_home}/.local/share/Steam/steamapps/common/Cyberpunk 2077");
+        let result = redact_with_home(&example, test_home);
         assert!(
             result.contains("$HOME"),
             "expected redaction for path: {}",
@@ -55,6 +48,13 @@ mod tests {
             result, example,
             "expected the home path to be actually redacted (not left unchanged)"
         );
+    }
+
+    #[test]
+    fn redact_with_home_skips_empty_and_root() {
+        let input = "/some/path";
+        assert_eq!(redact_with_home(input, ""), input);
+        assert_eq!(redact_with_home(input, "/"), input);
     }
 
     #[test]
