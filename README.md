@@ -47,9 +47,11 @@ SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry --manifest-path ..
 cd ../..
 
 TS=$(date +%Y%m%d_%H%M%S)
-RE2R_SESSION_DIR="neuromorphic_data/re2r_${TS}"
-mkdir -p "$RE2R_SESSION_DIR" && cd "$RE2R_SESSION_DIR"
+SESSION_DIR="neuromorphic_data/re2r_${TS}"
+mkdir -p "$SESSION_DIR" && cd "$SESSION_DIR"
 SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
+# Ctrl+C to flush, then cd back for export/query steps
+cd ../..
 ```
 
 Then:
