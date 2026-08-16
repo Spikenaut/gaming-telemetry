@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Privacy utilities for path redaction and safe handling.
 //!
 //! Used for error logs and query display so absolute home paths are not echoed
