@@ -1,0 +1,19 @@
+CHANGELOG.md
+  s_38280b57063962::t_8708061c095d31 1-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "3ae286c6e065fb228deb0b3b9351b4b1fdb8b1f9",
+  "prompts": {},
+  "sessions": {
+    "s_38280b57063962": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cfc285c1-1c4d-4d21-a49e-6135562b5ee5",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
