@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! CPU telemetry via Linux k10temp (hwmon) and powercap energy counters.
 //!
 //! Uses time-delta calculation for accurate package power measurement.

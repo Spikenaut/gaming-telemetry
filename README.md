@@ -1,5 +1,7 @@
 # Gaming Telemetry: Neuromorphic Data Collector for SNN Training
 
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 ## Overview
 
 High-frequency GPU/CPU telemetry for a workstation (optimized for **RTX 5080** under max-settings games). The collector is **game-agnostic**: it reads NVIDIA NVML + Linux CPU sensors and writes Parquet batches for neuromorphic / SNN training.
@@ -119,4 +121,17 @@ Max settings only. No install path is required by this repo.
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Previous releases (up to and including commit `ea6dc6d`) were published under GPL-3.0.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
+this work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any
+additional terms or conditions.
