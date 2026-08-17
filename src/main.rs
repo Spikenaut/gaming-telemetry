@@ -261,6 +261,9 @@ async fn perform_shutdown(
         let redacted = privacy::redact_personal_path(&format!("{:?}", e));
         eprintln!("Failed to finalize session manifest: {}", redacted);
         sentry::capture_message(&redacted, sentry::Level::Error);
+        // A missing on-disk finalize (`ended_at_utc: null`) is an unclean exit;
+        // do not report graceful success or a zero exit status.
+        return Err(e);
     }
 
     if *write_failures > 0 {
