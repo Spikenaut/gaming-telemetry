@@ -37,24 +37,18 @@ MangoHud (or any overlay) is **not** recorded. You may still run it yourself for
 
 ### 1. Capture a labeled session
 
-Use a dedicated per-session directory so batches from different runs do not overwrite each other.
+Set `SESSION_DIR` and the collector creates that directory and writes everything into it, so batches from different runs never overwrite each other. No `cd` required.
 
 ```bash
 # Examples: kcd2, re2r, re3r, re_requiem, cp2077, …
-TS=$(date +%Y%m%d_%H%M%S)
-SESSION_DIR="neuromorphic_data/kcd2_${TS}"
-mkdir -p "$SESSION_DIR" && cd "$SESSION_DIR"
-SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
-# Ctrl+C to flush, then cd back for the next session
-cd ../..
+SESSION_DIR="neuromorphic_data/kcd2_$(date +%Y%m%d_%H%M%S)" SESSION_LABEL=kcd2 \
+  cargo run --release --bin gaming-telemetry
 
-TS=$(date +%Y%m%d_%H%M%S)
-SESSION_DIR="neuromorphic_data/re2r_${TS}"
-mkdir -p "$SESSION_DIR" && cd "$SESSION_DIR"
-SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry --manifest-path ../../Cargo.toml
-# Ctrl+C to flush, then cd back for export/query steps
-cd ../..
+SESSION_DIR="neuromorphic_data/re2r_$(date +%Y%m%d_%H%M%S)" SESSION_LABEL=re2r \
+  cargo run --release --bin gaming-telemetry
 ```
+
+`SESSION_DIR` is optional — unset, the collector writes to the current directory as it always did.
 
 Then:
 
@@ -62,11 +56,62 @@ Then:
 2. Play the session while the collector runs (default poll: **5 ms**, override with `POLL_INTERVAL_MS`).
 3. Ctrl+C to flush the last batch and exit.
 
-Output files (multiple batches per directory):
+Each session directory contains:
 
-`gpu_telemetry_v2_batch_N.parquet`
+```text
+neuromorphic_data/kcd2_20260816_101500/
+├── session_manifest.json          # what was captured, and how well
+└── gpu_telemetry_v2_batch_N.parquet
+```
+
+Restarting the collector into an existing session directory **continues** that session:
+`session_id` and `started_at_utc` are preserved, `restart_count` increments, and batch
+numbering resumes from the highest existing batch instead of overwriting batch 1.
 
 The export and query examples below reuse the `$SESSION_DIR` variable from the capture block you ran. If you used a different directory, substitute its name.
+
+### The session manifest
+
+Written at start so the directory is self-describing during capture, then finalized on clean
+shutdown with the end time and timing statistics. It is written via a temp file and rename, so a
+crash mid-write can never leave truncated JSON.
+
+```json
+{
+  "schema_version": 1,
+  "session_id": "kcd2_20260816_101500",
+  "session_label": "kcd2",
+  "started_at_utc": "2026-08-16T10:15:00.123Z",
+  "ended_at_utc": "2026-08-16T11:02:31.887Z",
+  "poll_interval_ms_requested": 5,
+  "collector_version": "0.1.0",
+  "git_commit": "54f5b74",
+  "restart_count": 0,
+  "host": { "gpu_name": "NVIDIA GeForce RTX 5080", "driver": "580.00", "cpu_model": "…" },
+  "workload": { "class": "gaming", "label": "kcd2" },
+  "timing": {
+    "poll_interval_ms_requested": 5,
+    "sample_count": 1440000,
+    "observed_interval_ms": { "p50": 5.1, "p95": 5.4, "max": 41.2 },
+    "late_sample_count": 812,
+    "skipped_tick_estimate": 190,
+    "elapsed_basis": "monotonic",
+    "row_timestamp_basis": "wall_clock_utc"
+  }
+}
+```
+
+**Why the timing block matters.** A nominal 5 ms stream does not necessarily behave like one.
+`observed_interval_ms` reports what actually happened, `late_sample_count` counts intervals
+exceeding 1.5× the requested one, and `skipped_tick_estimate` counts ticks dropped under
+`MissedTickBehavior::Skip`. The two `*_basis` fields exist because intervals are measured on the
+**monotonic** clock while row `timestamp_ms` comes from the **wall** clock — an NTP step moves one
+and not the other, and a consumer aligning them needs to know that.
+
+`workload.class` defaults to `gaming`; override with `WORKLOAD_CLASS`.
+
+The manifest deliberately records no usernames, home paths, Steam identifiers, or machine
+inventory — only hardware model names.
 
 ### 2. Export canonical CSV for `corinth-canal`
 

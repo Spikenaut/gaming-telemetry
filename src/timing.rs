@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! Timing-quality tracking for the poll loop.
+//!
+//! A nominal 5 ms stream does not necessarily behave like a 5 ms stream. Anything
+//! replaying this data needs to know how well the requested cadence actually held,
+//! so the collector measures the observed interval between samples and reports
+//! percentiles alongside late/skipped counts in the session manifest.
+//!
+//! Intervals are measured on a **monotonic** clock (`Instant`), while row
+//! timestamps come from the wall clock (`Utc::now()`). Those are different time
+//! bases — a wall-clock step (NTP) moves row timestamps but not these intervals —
+//! so the summary records which basis is which.
+
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
+
+/// Histogram resolution. 100 µs buckets are finer than any cadence this collector
+/// polls at, so percentile error stays below the bucket width.
+const BUCKET_US: u64 = 100;
+/// Buckets cover 0..100 ms; anything slower lands in the overflow counter.
+const BUCKET_COUNT: usize = 1000;
+
+/// A sample is "late" when its observed interval exceeds the requested interval by
+/// this factor. Loose enough not to flag ordinary scheduler jitter.
+const LATE_FACTOR_NUMERATOR: u64 = 3;
+const LATE_FACTOR_DENOMINATOR: u64 = 2;
+
+/// Percentiles of the observed inter-sample interval, in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct IntervalPercentiles {
+    pub p50: f64,
+    pub p95: f64,
+    pub max: f64,
+}
+
+/// Serializable timing summary embedded in the session manifest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimingSummary {
+    pub poll_interval_ms_requested: u64,
+    pub sample_count: u64,
+    pub observed_interval_ms: IntervalPercentiles,
+    pub late_sample_count: u64,
+    pub skipped_tick_estimate: u64,
+    /// Clock used for the interval measurements above.
+    pub elapsed_basis: String,
+    /// Clock used for the `timestamp_ms` column in the Parquet batches.
+    pub row_timestamp_basis: String,
+}
+
+/// Bounded-memory tracker for inter-sample intervals.
+///
+/// Memory is constant regardless of run length: a multi-hour 5 ms capture produces
+/// millions of samples but still only touches the fixed bucket array.
+pub struct TimingStats {
+    requested_ms: u64,
+    sample_count: u64,
+    buckets: Vec<u32>,
+    overflow: u64,
+    max_us: u64,
+    late: u64,
+    skipped: u64,
+    last: Option<Instant>,
+}
+
+impl TimingStats {
+    pub fn new(requested_ms: u64) -> Self {
+        Self {
+            requested_ms,
+            sample_count: 0,
+            buckets: vec![0; BUCKET_COUNT],
+            overflow: 0,
+            max_us: 0,
+            late: 0,
+            skipped: 0,
+            last: None,
+        }
+    }
+
+    /// Record one poll tick. The first call establishes the baseline and
+    /// contributes no interval.
+    pub fn record(&mut self, now: Instant) {
+        self.sample_count += 1;
+        if let Some(previous) = self.last {
+            let delta_us = now.duration_since(previous).as_micros() as u64;
+            self.record_interval_us(delta_us);
+        }
+        self.last = Some(now);
+    }
+
+    /// Interval ingestion split out from the clock so it can be unit tested.
+    fn record_interval_us(&mut self, delta_us: u64) {
+        let index = (delta_us / BUCKET_US) as usize;
+        match self.buckets.get_mut(index) {
+            Some(bucket) => *bucket += 1,
+            None => self.overflow += 1,
+        }
+        self.max_us = self.max_us.max(delta_us);
+
+        let requested_us = self.requested_ms.saturating_mul(1000);
+        if requested_us > 0 {
+            let late_threshold =
+                requested_us.saturating_mul(LATE_FACTOR_NUMERATOR) / LATE_FACTOR_DENOMINATOR;
+            if delta_us > late_threshold {
+                self.late += 1;
+            }
+            // With `MissedTickBehavior::Skip`, a long gap means ticks were dropped
+            // rather than queued, so the ratio estimates how many.
+            self.skipped += (delta_us / requested_us).saturating_sub(1);
+        }
+    }
+
+    /// Total intervals recorded (one fewer than the sample count).
+    fn interval_count(&self) -> u64 {
+        self.buckets
+            .iter()
+            .map(|count| u64::from(*count))
+            .sum::<u64>()
+            + self.overflow
+    }
+
+    /// Interpolate a percentile out of the histogram, in milliseconds.
+    ///
+    /// Returns the upper edge of the bucket where the cumulative count crosses the
+    /// target, so the reported value is never an underestimate of the real one.
+    fn percentile_ms(&self, fraction: f64) -> f64 {
+        let total = self.interval_count();
+        if total == 0 {
+            return 0.0;
+        }
+        // `ceil` so p50 of a single interval reports that interval, not zero.
+        let target = ((total as f64) * fraction).ceil().max(1.0) as u64;
+        let mut cumulative = 0u64;
+        for (index, count) in self.buckets.iter().enumerate() {
+            cumulative += u64::from(*count);
+            if cumulative >= target {
+                return ((index as u64 + 1) * BUCKET_US) as f64 / 1000.0;
+            }
+        }
+        // Target falls in the overflow bucket: the exact max is the best answer.
+        self.max_us as f64 / 1000.0
+    }
+
+    pub fn summary(&self) -> TimingSummary {
+        TimingSummary {
+            poll_interval_ms_requested: self.requested_ms,
+            sample_count: self.sample_count,
+            observed_interval_ms: IntervalPercentiles {
+                p50: self.percentile_ms(0.50),
+                p95: self.percentile_ms(0.95),
+                max: self.max_us as f64 / 1000.0,
+            },
+            late_sample_count: self.late,
+            skipped_tick_estimate: self.skipped,
+            elapsed_basis: "monotonic".to_owned(),
+            row_timestamp_basis: "wall_clock_utc".to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats_from_intervals(requested_ms: u64, intervals_us: &[u64]) -> TimingStats {
+        let mut stats = TimingStats::new(requested_ms);
+        // Mirror `record`'s bookkeeping without needing a real clock.
+        stats.sample_count = intervals_us.len() as u64 + 1;
+        for interval in intervals_us {
+            stats.record_interval_us(*interval);
+        }
+        stats
+    }
+
+    #[test]
+    fn empty_stats_are_all_zero() {
+        let summary = TimingStats::new(5).summary();
+        assert_eq!(summary.sample_count, 0);
+        assert_eq!(summary.observed_interval_ms.p50, 0.0);
+        assert_eq!(summary.observed_interval_ms.max, 0.0);
+        assert_eq!(summary.late_sample_count, 0);
+        assert_eq!(summary.skipped_tick_estimate, 0);
+    }
+
+    #[test]
+    fn steady_five_ms_stream_reports_five_ms() {
+        let stats = stats_from_intervals(5, &[5_000; 100]);
+        let summary = stats.summary();
+        assert_eq!(summary.sample_count, 101);
+        assert_eq!(summary.observed_interval_ms.p50, 5.1);
+        assert_eq!(summary.observed_interval_ms.p95, 5.1);
+        assert_eq!(summary.observed_interval_ms.max, 5.0);
+        assert_eq!(summary.late_sample_count, 0);
+        assert_eq!(summary.skipped_tick_estimate, 0);
+    }
+
+    #[test]
+    fn late_samples_counted_past_one_and_a_half_times_requested() {
+        // 7 ms is under the 7.5 ms threshold; 8 ms is over it.
+        let stats = stats_from_intervals(5, &[5_000, 7_000, 8_000]);
+        assert_eq!(stats.summary().late_sample_count, 1);
+    }
+
+    #[test]
+    fn skipped_ticks_estimated_from_interval_ratio() {
+        // A 23 ms gap at a 5 ms cadence means 4 intervals' worth elapsed, so 3 ticks
+        // were skipped.
+        let stats = stats_from_intervals(5, &[23_000]);
+        assert_eq!(stats.summary().skipped_tick_estimate, 3);
+    }
+
+    #[test]
+    fn max_is_exact_even_when_it_overflows_the_histogram() {
+        // 250 ms is past the 100 ms bucket range, so it lands in overflow, but max
+        // must still be reported precisely rather than clamped to the last bucket.
+        let stats = stats_from_intervals(5, &[5_000, 250_000]);
+        let summary = stats.summary();
+        assert_eq!(summary.observed_interval_ms.max, 250.0);
+        assert_eq!(stats.overflow, 1);
+    }
+
+    #[test]
+    fn p95_tracks_the_tail_not_the_median() {
+        // 10% slow samples: the nearest-rank p95 lands in the slow bucket while the
+        // median stays fast. (At exactly 5% slow it would *not* — rank 95 of 100 is
+        // still the last fast sample. p95 by definition tolerates 5% of the tail.)
+        let mut intervals = vec![5_000u64; 90];
+        intervals.extend(std::iter::repeat_n(40_000u64, 10));
+        let summary = stats_from_intervals(5, &intervals).summary();
+        assert_eq!(summary.observed_interval_ms.p50, 5.1);
+        assert_eq!(summary.observed_interval_ms.p95, 40.1);
+        assert_eq!(summary.observed_interval_ms.max, 40.0);
+    }
+
+    #[test]
+    fn p95_ignores_a_tail_smaller_than_five_percent() {
+        // Exactly 5 slow samples in 100 must not move p95 — this is the boundary the
+        // test above deliberately steps past, and getting it wrong would make the
+        // manifest overstate jitter.
+        let mut intervals = vec![5_000u64; 95];
+        intervals.extend(std::iter::repeat_n(40_000u64, 5));
+        let summary = stats_from_intervals(5, &intervals).summary();
+        assert_eq!(summary.observed_interval_ms.p95, 5.1);
+        assert_eq!(
+            summary.observed_interval_ms.max, 40.0,
+            "max must still surface the outliers p95 smooths over"
+        );
+    }
+
+    #[test]
+    fn record_uses_monotonic_clock_and_counts_samples() {
+        let mut stats = TimingStats::new(5);
+        let base = Instant::now();
+        stats.record(base);
+        // First tick establishes the baseline only.
+        assert_eq!(stats.interval_count(), 0);
+        stats.record(base + std::time::Duration::from_millis(5));
+        stats.record(base + std::time::Duration::from_millis(10));
+        assert_eq!(stats.summary().sample_count, 3);
+        assert_eq!(stats.interval_count(), 2);
+    }
+
+    #[test]
+    fn summary_declares_its_clock_bases() {
+        let summary = TimingStats::new(5).summary();
+        assert_eq!(summary.elapsed_basis, "monotonic");
+        assert_eq!(summary.row_timestamp_basis, "wall_clock_utc");
+    }
+}

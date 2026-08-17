@@ -6,6 +6,12 @@ edition = "2021"
 
 [workspace]
 
+# Shared home for manifest/timing/session/privacy logic, so the collector and the
+# helper binaries use one tested implementation instead of `#[path]` includes.
+[lib]
+name = "gaming_telemetry"
+path = "src/lib.rs"
+
 [dependencies]
 nvml-wrapper = { version = "0.12", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
