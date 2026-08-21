@@ -331,10 +331,6 @@ async fn main() -> Result<()> {
         poll_interval_ms,
         host,
     );
-    // Write immediately so the directory is self-describing during capture, not
-    // only after a clean exit.
-    manifest.write_atomic(&output_dir)?;
-
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
     // After write backpressure, do not burst-catch every missed 5ms tick.
@@ -342,6 +338,9 @@ async fn main() -> Result<()> {
     // Resume numbering so a restart in a populated directory cannot overwrite
     // batch 1.
     let mut batch_counter = session::highest_batch_id(&output_dir)?;
+    // Publish only after the fallible resume scan succeeds, so an unreadable
+    // existing directory cannot overwrite its prior completed manifest.
+    manifest.write_atomic(&output_dir)?;
     let mut cpu_monitor = CpuMonitor::new();
     let mut timing = TimingStats::new(poll_interval_ms);
     let mut in_flight: JoinSet<Result<()>> = JoinSet::new();
