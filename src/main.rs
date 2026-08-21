@@ -13,7 +13,7 @@ use nvml_wrapper::Nvml;
 use polars::prelude::*;
 use sentry::ClientInitGuard;
 use std::borrow::Cow;
-use std::fs::{rename, File};
+use std::fs::{remove_file, rename, File};
 use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
 use tokio::time::{interval, Duration, MissedTickBehavior};
@@ -170,9 +170,20 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -
         std::process::id()
     ));
     let mut file = File::create(&temporary)?;
-    ParquetWriter::new(&mut file).finish(&mut df)?;
-    file.sync_all()?;
-    rename(&temporary, &filename)?;
+    if let Err(error) = (|| -> Result<()> {
+        ParquetWriter::new(&mut file).finish(&mut df)?;
+        file.sync_all()?;
+        Ok(())
+    })() {
+        drop(file);
+        let _ = remove_file(&temporary);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = rename(&temporary, &filename) {
+        let _ = remove_file(&temporary);
+        return Err(error.into());
+    }
 
     println!(
         "Wrote batch {} to {}",
@@ -307,7 +318,6 @@ async fn main() -> Result<()> {
     let output_dir = session::resolve_dir()?;
     let started_at = Utc::now();
     let session_id = session::session_id(
-        &output_dir,
         &session_label,
         &started_at.format("%Y%m%dT%H%M%SZ").to_string(),
     );
@@ -331,7 +341,7 @@ async fn main() -> Result<()> {
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // Resume numbering so a restart in a populated directory cannot overwrite
     // batch 1.
-    let mut batch_counter = session::highest_batch_id(&output_dir);
+    let mut batch_counter = session::highest_batch_id(&output_dir)?;
     let mut cpu_monitor = CpuMonitor::new();
     let mut timing = TimingStats::new(poll_interval_ms);
     let mut in_flight: JoinSet<Result<()>> = JoinSet::new();
@@ -543,7 +553,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         write_to_parquet(vec![sample_fixture("kcd2")], 4, &tmp).expect("parquet write");
-        assert_eq!(session::highest_batch_id(&tmp), 4);
+        assert_eq!(session::highest_batch_id(&tmp).unwrap(), 4);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

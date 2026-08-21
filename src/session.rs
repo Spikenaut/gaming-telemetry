@@ -62,18 +62,9 @@ pub fn resolve_dir() -> Result<PathBuf> {
 
 /// Stable identifier for a capture session.
 ///
-/// Derived from the session directory's own name so a directory is
-/// self-identifying. Falls back to `<label>_<timestamp>` when the directory name is
-/// unusable (empty, or nothing survives sanitization — e.g. a path ending in `/`,
-/// or a CJK-only directory name).
-pub fn session_id(dir: &Path, label: &str, started_at: &str) -> String {
-    let from_dir = dir
-        .file_name()
-        .map(|name| sanitize_label(&name.to_string_lossy()))
-        .unwrap_or_default();
-    if !from_dir.is_empty() {
-        return from_dir;
-    }
+/// Derived from the caller-provided session label and start timestamp, never from
+/// a directory name that could contain personal information.
+pub fn session_id(label: &str, started_at: &str) -> String {
     let stamp = sanitize_label(started_at);
     if label.is_empty() {
         format!("session_{stamp}")
@@ -90,22 +81,30 @@ pub fn session_id(dir: &Path, label: &str, started_at: &str) -> String {
 ///
 /// Parses the numeric suffix rather than sorting names — lexicographically
 /// `batch_10` sorts before `batch_2`.
-pub fn highest_batch_id(dir: &Path) -> u32 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            name.strip_prefix(BATCH_PREFIX)?
-                .strip_suffix(BATCH_SUFFIX)?
-                .parse::<u32>()
-                .ok()
-        })
-        .max()
-        .unwrap_or(0)
+pub fn highest_batch_id(dir: &Path) -> Result<u32> {
+    let entries = std::fs::read_dir(dir).with_context(|| {
+        format!(
+            "failed to enumerate session directory {}",
+            crate::privacy::redact_personal_path(&dir.display().to_string())
+        )
+    })?;
+    let mut highest = 0;
+    for entry in entries {
+        let entry = entry.context("failed to enumerate a session directory entry")?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(id) = name
+            .strip_prefix(BATCH_PREFIX)
+            .and_then(|name| name.strip_suffix(BATCH_SUFFIX))
+            .and_then(|id| id.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        highest = highest.max(id);
+    }
+    Ok(highest)
 }
 
 #[cfg(test)]
@@ -154,28 +153,18 @@ mod tests {
     }
 
     #[test]
-    fn session_id_prefers_the_directory_name() {
-        let id = session_id(Path::new("/data/kcd2_20260816_101500"), "kcd2", "stamp");
-        assert_eq!(id, "kcd2_20260816_101500");
-    }
-
-    #[test]
-    fn session_id_falls_back_when_directory_name_is_unusable() {
-        // Nothing survives sanitization, so the directory cannot identify itself.
-        let id = session_id(Path::new("/data/日本語"), "kcd2", "20260816T101500Z");
+    fn session_id_never_uses_directory_components() {
+        let id = session_id("kcd2", "20260816T101500Z");
         assert_eq!(id, "kcd2_20260816T101500Z");
-
-        // Root has no file_name at all, and with no label we still get something
-        // non-empty rather than a bare timestamp.
-        let id = session_id(Path::new("/"), "", "20260816T101500Z");
+        let id = session_id("", "20260816T101500Z");
         assert_eq!(id, "session_20260816T101500Z");
     }
 
     #[test]
     fn highest_batch_id_is_zero_for_empty_and_missing_dirs() {
         let dir = temp_dir("empty");
-        assert_eq!(highest_batch_id(&dir), 0);
-        assert_eq!(highest_batch_id(Path::new("/nonexistent/path/xyz")), 0);
+        assert_eq!(highest_batch_id(&dir).unwrap(), 0);
+        assert!(highest_batch_id(Path::new("/nonexistent/path/xyz")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -186,7 +175,7 @@ mod tests {
             std::fs::write(dir.join(format!("{BATCH_PREFIX}{id}{BATCH_SUFFIX}")), b"x").unwrap();
         }
         // Lexicographic ordering would answer "2" here.
-        assert_eq!(highest_batch_id(&dir), 10);
+        assert_eq!(highest_batch_id(&dir).unwrap(), 10);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -201,7 +190,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(format!("{BATCH_PREFIX}7{BATCH_SUFFIX}")), b"x").unwrap();
-        assert_eq!(highest_batch_id(&dir), 7);
+        assert_eq!(highest_batch_id(&dir).unwrap(), 7);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
