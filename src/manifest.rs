@@ -97,6 +97,10 @@ pub struct SessionManifest {
     pub restart_count: u32,
     pub host: HostInfo,
     pub workload: Workload,
+    /// Number of Parquet batches that failed during this process run. A nonzero
+    /// value means timing sample_count can exceed rows available on disk.
+    #[serde(default)]
+    pub parquet_write_failures: u32,
     pub timing: Option<TimingSummary>,
 }
 
@@ -129,6 +133,7 @@ impl SessionManifest {
             restart_count: 0,
             host,
             workload,
+            parquet_write_failures: 0,
             timing: None,
         }
     }
@@ -171,10 +176,16 @@ impl SessionManifest {
         manifest
     }
 
-    /// Stamp the end of the session and attach the timing summary.
-    pub fn finalize(&mut self, ended_at_utc: DateTime<Utc>, timing: TimingSummary) {
+    /// Stamp when collection stopped and attach the timing/persistence summary.
+    pub fn finalize(
+        &mut self,
+        ended_at_utc: DateTime<Utc>,
+        timing: TimingSummary,
+        parquet_write_failures: u32,
+    ) {
         self.ended_at_utc = Some(ended_at_utc);
         self.timing = Some(timing);
+        self.parquet_write_failures = parquet_write_failures;
     }
 
     /// Serialize to `session_manifest.json` via a temp file and rename.
@@ -298,7 +309,7 @@ mod tests {
         let mut stats = TimingStats::new(5);
         stats.record(std::time::Instant::now());
 
-        manifest.finalize(Utc::now(), stats.summary());
+        manifest.finalize(Utc::now(), stats.summary(), 0);
         manifest.write_atomic(&dir).unwrap();
 
         let reloaded = SessionManifest::load(&dir).unwrap();
@@ -306,6 +317,7 @@ mod tests {
         let timing = reloaded.timing.expect("timing summary should be attached");
         assert_eq!(timing.poll_interval_ms_requested, 5);
         assert_eq!(timing.sample_count, 1);
+        assert_eq!(reloaded.parquet_write_failures, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -315,7 +327,7 @@ mod tests {
         let dir = temp_dir("restart");
         let mut first = fixture("original_id");
         let original_start = first.started_at_utc;
-        first.finalize(Utc::now(), TimingStats::new(5).summary());
+        first.finalize(Utc::now(), TimingStats::new(5).summary(), 0);
         first.write_atomic(&dir).unwrap();
 
         // A later process resolves a different id/start, but the directory already

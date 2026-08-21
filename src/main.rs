@@ -256,6 +256,9 @@ async fn perform_shutdown(
     manifest: &mut SessionManifest,
     timing: &TimingStats,
 ) -> Result<()> {
+    // This is the last instant the collector may have produced telemetry. Storage
+    // drain can take much longer and must not inflate the capture's end time.
+    let capture_ended_at_utc = Utc::now();
     if !buffer.is_empty() {
         let new_batch_id = batch_counter + 1;
         if let Err(e) = write_to_parquet(buffer, new_batch_id, output_dir) {
@@ -268,8 +271,8 @@ async fn perform_shutdown(
     drain_in_flight(in_flight, write_failures).await;
 
     // Finalize before any failure bail-out: a run that lost batches still deserves
-    // an accurate manifest describing what it did capture.
-    manifest.finalize(Utc::now(), timing.summary());
+    // an accurate manifest describing what it acquired and what failed to persist.
+    manifest.finalize(capture_ended_at_utc, timing.summary(), *write_failures);
     if let Err(e) = manifest.write_atomic(output_dir) {
         let redacted = privacy::redact_personal_path(&format!("{:?}", e));
         eprintln!("Failed to finalize session manifest: {}", redacted);

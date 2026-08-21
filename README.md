@@ -89,6 +89,7 @@ crash mid-write can never leave truncated JSON.
   "restart_count": 0,
   "host": { "gpu_name": "NVIDIA GeForce RTX 5080", "driver": "580.00", "cpu_model": "…" },
   "workload": { "class": "gaming", "label": "kcd2" },
+  "parquet_write_failures": 0,
   "timing": {
     "poll_interval_ms_requested": 5,
     "sample_count": 1440000,
@@ -107,6 +108,11 @@ exceeding 1.5× the requested one, and `skipped_tick_estimate` counts ticks drop
 `MissedTickBehavior::Skip`. The two `*_basis` fields exist because intervals are measured on the
 **monotonic** clock while row `timestamp_ms` comes from the **wall** clock — an NTP step moves one
 and not the other, and a consumer aligning them needs to know that.
+
+`timing.sample_count` counts samples acquired by the collector. If
+`parquet_write_failures` is nonzero, one or more acquired batches were not persisted, so consumers
+must account for that data loss. `ended_at_utc` marks when collection stopped, before any remaining
+batch writes are drained.
 
 `workload.class` defaults to `gaming`; override with `WORKLOAD_CLASS`.
 
