@@ -153,6 +153,7 @@ For multi-title training mixes, group by Parquet `session_label` (or by folder u
 | Kingdom Come Deliverance 2 | `kcd2` |
 | Resident Evil 2 Remake | `re2r` |
 | Resident Evil 3 Remake | `re3r` |
+| Resident Evil 4 Remake | `re4r` |
 | Resident Evil Requiem | `re_requiem` |
 | Cyberpunk 2077 | `cp2077` |
 
