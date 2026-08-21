@@ -18,8 +18,17 @@ use std::time::Instant;
 /// Histogram resolution. 100 µs buckets are finer than any cadence this collector
 /// polls at, so percentile error stays below the bucket width.
 const BUCKET_US: u64 = 100;
-/// Buckets cover 0..100 ms; anything slower lands in the overflow counter.
+/// Buckets cover 0..100 ms at 100 µs resolution.
 const BUCKET_COUNT: usize = 1000;
+/// Above 100 ms, retain millisecond-resolution buckets through ten seconds. That
+/// keeps common storage/backpressure delays distinguishable without making
+/// tracker memory depend on capture length.
+const TAIL_BUCKET_US: u64 = 1_000;
+const TAIL_BUCKET_COUNT: usize = 9_900;
+const TAIL_CEILING_US: u64 = 10_000_000;
+/// Longer gaps use exponentially wider bins; this still distinguishes ordinary
+/// multi-second stalls from rare extreme pauses with fixed memory.
+const OVERFLOW_BUCKET_COUNT: usize = 64;
 
 /// A sample is "late" when its observed interval exceeds the requested interval by
 /// this factor. Loose enough not to flag ordinary scheduler jitter.
@@ -56,7 +65,8 @@ pub struct TimingStats {
     requested_ms: u64,
     sample_count: u64,
     buckets: Vec<u32>,
-    overflow: u64,
+    tail_buckets: Vec<u32>,
+    overflow_buckets: Vec<u32>,
     max_us: u64,
     late: u64,
     skipped: u64,
@@ -69,7 +79,8 @@ impl TimingStats {
             requested_ms,
             sample_count: 0,
             buckets: vec![0; BUCKET_COUNT],
-            overflow: 0,
+            tail_buckets: vec![0; TAIL_BUCKET_COUNT],
+            overflow_buckets: vec![0; OVERFLOW_BUCKET_COUNT],
             max_us: 0,
             late: 0,
             skipped: 0,
@@ -91,9 +102,21 @@ impl TimingStats {
     /// Interval ingestion split out from the clock so it can be unit tested.
     fn record_interval_us(&mut self, delta_us: u64) {
         let index = (delta_us / BUCKET_US) as usize;
-        match self.buckets.get_mut(index) {
-            Some(bucket) => *bucket += 1,
-            None => self.overflow += 1,
+        if let Some(bucket) = self.buckets.get_mut(index) {
+            *bucket += 1;
+        } else if delta_us < TAIL_CEILING_US {
+            let tail_index =
+                ((delta_us - (BUCKET_COUNT as u64 * BUCKET_US)) / TAIL_BUCKET_US) as usize;
+            self.tail_buckets[tail_index] += 1;
+        } else {
+            let mut upper = TAIL_CEILING_US;
+            for (index, bucket) in self.overflow_buckets.iter_mut().enumerate() {
+                upper = upper.saturating_mul(2);
+                if delta_us < upper || index + 1 == OVERFLOW_BUCKET_COUNT {
+                    *bucket += 1;
+                    break;
+                }
+            }
         }
         self.max_us = self.max_us.max(delta_us);
 
@@ -116,7 +139,16 @@ impl TimingStats {
             .iter()
             .map(|count| u64::from(*count))
             .sum::<u64>()
-            + self.overflow
+            + self
+                .tail_buckets
+                .iter()
+                .map(|count| u64::from(*count))
+                .sum::<u64>()
+            + self
+                .overflow_buckets
+                .iter()
+                .map(|count| u64::from(*count))
+                .sum::<u64>()
     }
 
     /// Interpolate a percentile out of the histogram, in milliseconds.
@@ -137,7 +169,22 @@ impl TimingStats {
                 return ((index as u64 + 1) * BUCKET_US) as f64 / 1000.0;
             }
         }
-        // Target falls in the overflow bucket: the exact max is the best answer.
+        for (index, count) in self.tail_buckets.iter().enumerate() {
+            cumulative += u64::from(*count);
+            if cumulative >= target {
+                let upper = (BUCKET_COUNT as u64 * BUCKET_US) + (index as u64 + 1) * TAIL_BUCKET_US;
+                return upper as f64 / 1000.0;
+            }
+        }
+        let mut upper = TAIL_CEILING_US;
+        for count in &self.overflow_buckets {
+            cumulative += u64::from(*count);
+            upper = upper.saturating_mul(2);
+            if cumulative >= target {
+                return upper as f64 / 1000.0;
+            }
+        }
+        // Defensive fallback for a value beyond the final saturated bucket.
         self.max_us as f64 / 1000.0
     }
 
@@ -211,12 +258,23 @@ mod tests {
 
     #[test]
     fn max_is_exact_even_when_it_overflows_the_histogram() {
-        // 250 ms is past the 100 ms bucket range, so it lands in overflow, but max
-        // must still be reported precisely rather than clamped to the last bucket.
+        // 250 ms is past the 100 ms primary range, but max must still be reported
+        // precisely rather than clamped to a histogram edge.
         let stats = stats_from_intervals(5, &[5_000, 250_000]);
         let summary = stats.summary();
         assert_eq!(summary.observed_interval_ms.max, 250.0);
-        assert_eq!(stats.overflow, 1);
+        assert_eq!(stats.tail_buckets.iter().sum::<u32>(), 1);
+    }
+
+    #[test]
+    fn p95_retains_tail_distribution_above_the_primary_histogram() {
+        // The 5 s outlier must not replace the p95 of the nine 110 ms stalls.
+        let mut intervals = vec![5_000u64; 90];
+        intervals.extend(std::iter::repeat_n(110_000u64, 9));
+        intervals.push(5_000_000);
+        let summary = stats_from_intervals(5, &intervals).summary();
+        assert_eq!(summary.observed_interval_ms.p95, 111.0);
+        assert_eq!(summary.observed_interval_ms.max, 5_000.0);
     }
 
     #[test]

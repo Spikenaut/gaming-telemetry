@@ -13,7 +13,7 @@ use nvml_wrapper::Nvml;
 use polars::prelude::*;
 use sentry::ClientInitGuard;
 use std::borrow::Cow;
-use std::fs::File;
+use std::fs::{rename, File};
 use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
 use tokio::time::{interval, Duration, MissedTickBehavior};
@@ -158,8 +158,21 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -
         batch_id,
         session::BATCH_SUFFIX
     ));
-    let file = File::create(&filename)?;
-    ParquetWriter::new(file).finish(&mut df)?;
+    // A failed writer must never publish an incomplete file under the final batch
+    // name: restart scanning treats final names as complete batches. The temporary
+    // name cannot match `highest_batch_id` and is published only after a complete,
+    // flushed write.
+    let temporary = output_dir.join(format!(
+        ".{}{}{}.{}.tmp",
+        session::BATCH_PREFIX,
+        batch_id,
+        session::BATCH_SUFFIX,
+        std::process::id()
+    ));
+    let mut file = File::create(&temporary)?;
+    ParquetWriter::new(&mut file).finish(&mut df)?;
+    file.sync_all()?;
+    rename(&temporary, &filename)?;
 
     println!(
         "Wrote batch {} to {}",
@@ -488,6 +501,13 @@ mod tests {
         )
         .expect("parquet write");
         assert!(path.is_file());
+        assert!(
+            std::fs::read_dir(&tmp)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "a successful write publishes only the final batch name"
+        );
 
         // Verify the session_label column is written for every row.
         let df = LazyFrame::scan_parquet(&path, ScanArgsParquet::default())
