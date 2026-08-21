@@ -64,9 +64,9 @@ pub struct TimingSummary {
 pub struct TimingStats {
     requested_ms: u64,
     sample_count: u64,
-    buckets: Vec<u32>,
-    tail_buckets: Vec<u32>,
-    overflow_buckets: Vec<u32>,
+    buckets: Vec<u64>,
+    tail_buckets: Vec<u64>,
+    overflow_buckets: Vec<u64>,
     max_us: u64,
     late: u64,
     skipped: u64,
@@ -135,20 +135,9 @@ impl TimingStats {
 
     /// Total intervals recorded (one fewer than the sample count).
     fn interval_count(&self) -> u64 {
-        self.buckets
-            .iter()
-            .map(|count| u64::from(*count))
-            .sum::<u64>()
-            + self
-                .tail_buckets
-                .iter()
-                .map(|count| u64::from(*count))
-                .sum::<u64>()
-            + self
-                .overflow_buckets
-                .iter()
-                .map(|count| u64::from(*count))
-                .sum::<u64>()
+        self.buckets.iter().copied().sum::<u64>()
+            + self.tail_buckets.iter().copied().sum::<u64>()
+            + self.overflow_buckets.iter().copied().sum::<u64>()
     }
 
     /// Interpolate a percentile out of the histogram, in milliseconds.
@@ -164,13 +153,13 @@ impl TimingStats {
         let target = ((total as f64) * fraction).ceil().max(1.0) as u64;
         let mut cumulative = 0u64;
         for (index, count) in self.buckets.iter().enumerate() {
-            cumulative += u64::from(*count);
+            cumulative += *count;
             if cumulative >= target {
                 return ((index as u64 + 1) * BUCKET_US) as f64 / 1000.0;
             }
         }
         for (index, count) in self.tail_buckets.iter().enumerate() {
-            cumulative += u64::from(*count);
+            cumulative += *count;
             if cumulative >= target {
                 let upper = (BUCKET_COUNT as u64 * BUCKET_US) + (index as u64 + 1) * TAIL_BUCKET_US;
                 return upper as f64 / 1000.0;
@@ -178,7 +167,7 @@ impl TimingStats {
         }
         let mut upper = TAIL_CEILING_US;
         for count in &self.overflow_buckets {
-            cumulative += u64::from(*count);
+            cumulative += *count;
             upper = upper.saturating_mul(2);
             if cumulative >= target {
                 return upper as f64 / 1000.0;
@@ -263,7 +252,7 @@ mod tests {
         let stats = stats_from_intervals(5, &[5_000, 250_000]);
         let summary = stats.summary();
         assert_eq!(summary.observed_interval_ms.max, 250.0);
-        assert_eq!(stats.tail_buckets.iter().sum::<u32>(), 1);
+        assert_eq!(stats.tail_buckets.iter().sum::<u64>(), 1);
     }
 
     #[test]

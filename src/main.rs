@@ -106,6 +106,12 @@ const BUFFER_SIZE: usize = 2000; // ~10 seconds of data at default 5ms intervals
 /// Cap outstanding async Parquet writes so a slow disk cannot queue unbounded batches.
 const MAX_IN_FLIGHT_WRITES: usize = 2;
 
+fn next_batch_id(batch_id: u32) -> Result<u32> {
+    batch_id
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("batch ID namespace exhausted; start a new SESSION_DIR"))
+}
+
 fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -> Result<()> {
     let timestamps: Vec<i64> = samples
         .iter()
@@ -271,7 +277,7 @@ async fn perform_shutdown(
     // drain can take much longer and must not inflate the capture's end time.
     let capture_ended_at_utc = Utc::now();
     if !buffer.is_empty() {
-        let new_batch_id = batch_counter + 1;
+        let new_batch_id = next_batch_id(batch_counter)?;
         if let Err(e) = write_to_parquet(buffer, new_batch_id, output_dir) {
             *write_failures += 1;
             let redacted = privacy::redact_personal_path(&format!("{:?}", e));
@@ -319,7 +325,7 @@ async fn main() -> Result<()> {
     let started_at = Utc::now();
     let session_id = session::session_id(
         &session_label,
-        &started_at.format("%Y%m%dT%H%M%SZ").to_string(),
+        &started_at.format("%Y%m%dT%H%M%S%.fZ").to_string(),
     );
 
     let host = HostInfo::new(device.name().ok(), nvml.sys_driver_version().ok());
@@ -338,6 +344,10 @@ async fn main() -> Result<()> {
     // Resume numbering so a restart in a populated directory cannot overwrite
     // batch 1.
     let mut batch_counter = session::highest_batch_id(&output_dir)?;
+    anyhow::ensure!(
+        batch_counter < u32::MAX,
+        "batch ID namespace exhausted; start a new SESSION_DIR"
+    );
     // Publish only after the fallible resume scan succeeds, so an unreadable
     // existing directory cannot overwrite its prior completed manifest.
     manifest.write_atomic(&output_dir)?;
@@ -428,7 +438,7 @@ async fn main() -> Result<()> {
                     }
                     let samples_to_write =
                         std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
-                    batch_counter += 1;
+                    batch_counter = next_batch_id(batch_counter)?;
                     spawn_parquet_write(
                         &mut in_flight,
                         samples_to_write,
