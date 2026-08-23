@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Sidecar filename inside the session directory.
 pub const MANIFEST_FILENAME: &str = "session_manifest.json";
@@ -111,7 +114,16 @@ fn manifest_path(dir: &Path) -> PathBuf {
 }
 
 fn temp_path(dir: &Path) -> PathBuf {
-    dir.join(format!("{MANIFEST_FILENAME}.{}.tmp", std::process::id()))
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    dir.join(format!(
+        "{MANIFEST_FILENAME}.{}.{}.{sequence}.tmp",
+        std::process::id(),
+        nanos
+    ))
 }
 
 impl SessionManifest {

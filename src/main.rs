@@ -381,7 +381,8 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
-            _tick = interval.tick() => {
+            tick = interval.tick() => {
+                timing.record_scheduled_tick(tick.into_std());
 
                 let power_usage = device.power_usage().unwrap_or(0);
                 let temperature = device.temperature(TemperatureSensor::Gpu).unwrap_or(0);

@@ -78,6 +78,7 @@ pub struct TimingStats {
     late: u64,
     skipped: u64,
     last: Option<Instant>,
+    last_scheduled: Option<Instant>,
 }
 
 impl TimingStats {
@@ -92,6 +93,7 @@ impl TimingStats {
             late: 0,
             skipped: 0,
             last: None,
+            last_scheduled: None,
         }
     }
 
@@ -138,10 +140,23 @@ impl TimingStats {
             if delta_us > late_threshold {
                 self.late += 1;
             }
-            // With `MissedTickBehavior::Skip`, a long gap means ticks were dropped
-            // rather than queued, so the ratio estimates how many.
-            self.skipped += (delta_us / requested_us).saturating_sub(1);
         }
+    }
+
+    /// Record the deadline Tokio delivered, separately from observed sample time.
+    pub fn record_scheduled_tick(&mut self, now: Instant) {
+        if let Some(previous) = self.last_scheduled {
+            let delta_us: u64 = now
+                .duration_since(previous)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let requested_us = self.requested_ms.saturating_mul(1000);
+            if let Some(elapsed_ticks) = delta_us.checked_div(requested_us) {
+                self.skipped = self.skipped.saturating_add(elapsed_ticks.saturating_sub(1));
+            }
+        }
+        self.last_scheduled = Some(now);
     }
 
     /// Total intervals recorded (one fewer than the sample count).
@@ -253,7 +268,10 @@ mod tests {
     fn skipped_ticks_estimated_from_interval_ratio() {
         // A 23 ms gap at a 5 ms cadence means 4 intervals' worth elapsed, so 3 ticks
         // were skipped.
-        let stats = stats_from_intervals(5, &[23_000]);
+        let mut stats = TimingStats::new(5);
+        let base = Instant::now();
+        stats.record_scheduled_tick(base);
+        stats.record_scheduled_tick(base + std::time::Duration::from_millis(20));
         assert_eq!(stats.summary().skipped_tick_estimate, 3);
     }
 
