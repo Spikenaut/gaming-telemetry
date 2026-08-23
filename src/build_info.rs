@@ -12,20 +12,20 @@ pub fn collector_version() -> &'static str {
 /// Resolution order: `AGENTOS_GIT_SHA` (set by CI), then the source SHA embedded
 /// by `build.rs`, then `"unknown"`. Runtime working directories never affect it.
 pub fn git_sha() -> String {
-    if let Some(value) = std::env::var("AGENTOS_GIT_SHA")
-        .ok()
-        .map(|v| v.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return value;
-    }
-    if let Some(sha) = option_env!("GAMING_TELEMETRY_GIT_SHA")
+    git_sha_from_sources(
+        std::env::var("AGENTOS_GIT_SHA").ok().as_deref(),
+        option_env!("GAMING_TELEMETRY_GIT_SHA"),
+    )
+}
+
+fn git_sha_from_sources(agentos_sha: Option<&str>, embedded_sha: Option<&str>) -> String {
+    [agentos_sha, embedded_sha]
+        .into_iter()
+        .flatten()
         .map(str::trim)
-        .filter(|sha| !sha.is_empty())
-    {
-        return sha.to_owned();
-    }
-    "unknown".to_owned()
+        .find(|sha| !sha.is_empty())
+        .unwrap_or("unknown")
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -46,15 +46,10 @@ mod tests {
 
     #[test]
     fn git_sha_trims_agentos_env_var() {
-        // Set env var with leading and trailing whitespace
-        std::env::set_var("AGENTOS_GIT_SHA", "  abc123  ");
-
-        let result = git_sha();
-
-        // Clean up
-        std::env::remove_var("AGENTOS_GIT_SHA");
-
-        // Should return trimmed value
-        assert_eq!(result, "abc123");
+        assert_eq!(git_sha_from_sources(Some("  abc123  "), None), "abc123");
+        assert_eq!(
+            git_sha_from_sources(Some(" "), Some(" embedded ")),
+            "embedded"
+        );
     }
 }

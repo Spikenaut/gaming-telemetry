@@ -2,12 +2,88 @@
 
 //! Session directory, label, and batch-numbering helpers.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 /// Prefix of the Parquet batch files the collector writes.
 pub const BATCH_PREFIX: &str = "gpu_telemetry_v2_batch_";
 pub const BATCH_SUFFIX: &str = ".parquet";
+/// Default collector cadence when `POLL_INTERVAL_MS` is not configured.
+pub const DEFAULT_POLL_INTERVAL_MS: u64 = 5;
+
+/// Parse the requested poll interval, rejecting the zero duration that Tokio
+/// cannot construct an interval from.
+pub fn parse_poll_interval_ms(raw: Option<&str>) -> Result<u64> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_POLL_INTERVAL_MS);
+    };
+    let interval = raw
+        .parse::<u64>()
+        .with_context(|| format!("POLL_INTERVAL_MS must be a positive integer, got {raw:?}"))?;
+    if interval == 0 {
+        bail!("POLL_INTERVAL_MS must be greater than zero");
+    }
+    Ok(interval)
+}
+
+/// An advisory, process-lifetime lock for a capture directory.
+///
+/// A second collector writing the same directory can otherwise race both the
+/// manifest and batch-number scan. The lock is released automatically when this
+/// value is dropped at process exit.
+pub struct SessionLock {
+    _file: File,
+}
+
+#[cfg(unix)]
+mod flock {
+    use std::fs::File;
+    use std::os::unix::io::AsRawFd;
+
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+
+    pub fn try_exclusive(file: &File) -> bool {
+        // `file` remains owned by SessionLock for the duration of the process,
+        // so the kernel-held advisory lock cannot be released early.
+        unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) == 0 }
+    }
+}
+
+/// Acquire exclusive ownership of `dir` for one collector process.
+pub fn acquire_exclusive(dir: &Path) -> Result<SessionLock> {
+    let path = dir.join(".gaming-telemetry.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| {
+            format!(
+                "failed to open session lock {}",
+                crate::privacy::redact_personal_path(&path.display().to_string())
+            )
+        })?;
+
+    #[cfg(unix)]
+    if !flock::try_exclusive(&file) {
+        bail!(
+            "another collector already holds the session lock for {}",
+            crate::privacy::redact_personal_path(&dir.display().to_string())
+        );
+    }
+
+    #[cfg(not(unix))]
+    bail!("exclusive session locking is currently supported on Unix only");
+
+    Ok(SessionLock { _file: file })
+}
 
 /// Keep session tags as short ASCII identifiers (labels only — never used for
 /// paths or exec).
@@ -150,6 +226,28 @@ mod tests {
             "env",
             "empty CLI label should fall back to env"
         );
+    }
+
+    #[test]
+    fn poll_interval_defaults_but_rejects_zero_and_invalid_values() {
+        assert_eq!(
+            parse_poll_interval_ms(None).unwrap(),
+            DEFAULT_POLL_INTERVAL_MS
+        );
+        assert_eq!(parse_poll_interval_ms(Some(" 10 ")).unwrap(), 10);
+        assert!(parse_poll_interval_ms(Some("0")).is_err());
+        assert!(parse_poll_interval_ms(Some("fast")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_session_lock_prevents_a_second_collector() {
+        let dir = temp_dir("lock");
+        let lock = acquire_exclusive(&dir).unwrap();
+        assert!(acquire_exclusive(&dir).is_err());
+        drop(lock);
+        assert!(acquire_exclusive(&dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

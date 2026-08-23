@@ -40,12 +40,12 @@ MangoHud (or any overlay) is **not** recorded. You may still run it yourself for
 Set `SESSION_DIR` and the collector creates that directory and writes everything into it, so batches from different runs never overwrite each other. No `cd` required.
 
 ```bash
-# Examples: kcd2, re2r, re3r, re_requiem, cp2077, …
-SESSION_DIR="neuromorphic_data/kcd2_$(date +%Y%m%d_%H%M%S)" SESSION_LABEL=kcd2 \
-  cargo run --release --bin gaming-telemetry
+# Examples: kcd2, re2r, re3r, re4r, re_requiem, cp2077, …
+export SESSION_DIR="neuromorphic_data/kcd2_$(date +%Y%m%d_%H%M%S)"
+SESSION_LABEL=kcd2 cargo run --release --bin gaming-telemetry
 
-SESSION_DIR="neuromorphic_data/re2r_$(date +%Y%m%d_%H%M%S)" SESSION_LABEL=re2r \
-  cargo run --release --bin gaming-telemetry
+export SESSION_DIR="neuromorphic_data/re2r_$(date +%Y%m%d_%H%M%S)"
+SESSION_LABEL=re2r cargo run --release --bin gaming-telemetry
 ```
 
 `SESSION_DIR` is optional — unset, the collector writes to the current directory as it always did.
@@ -65,16 +65,23 @@ neuromorphic_data/kcd2_20260816_101500/
 ```
 
 Restarting the collector into an existing session directory **continues** that session:
-`session_id` and `started_at_utc` are preserved, `restart_count` increments, and batch
-numbering resumes from the highest existing batch instead of overwriting batch 1.
+`session_id`, `started_at_utc`, `session_label`, and `workload` are preserved, `restart_count`
+increments, and batch numbering resumes from the highest existing batch instead of overwriting
+batch 1. Only one collector may write a `SESSION_DIR` at once; a second process exits rather than
+racing the manifest or batch numbers.
+
+A directory containing legacy Parquet batches but no `session_manifest.json` is rejected rather
+than silently assigning its old data a new session identity. Move those batches to a separate
+directory or restore their original manifest before resuming.
 
 The export and query examples below reuse the `$SESSION_DIR` variable from the capture block you ran. If you used a different directory, substitute its name.
 
 ### The session manifest
 
 Written at start so the directory is self-describing during capture, then finalized on clean
-shutdown with the end time and timing statistics. It is written via a temp file and rename, so a
-crash mid-write can never leave truncated JSON.
+shutdown with the end time and timing statistics. The temp file name includes the process ID, is
+flushed to disk before rename, and the directory is synced after rename; a crash mid-write can
+never publish truncated JSON.
 
 ```json
 {
@@ -91,6 +98,7 @@ crash mid-write can never leave truncated JSON.
   "workload": { "class": "gaming", "label": "kcd2" },
   "parquet_write_failures": 0,
   "timing": {
+    "scope": "latest_process",
     "poll_interval_ms_requested": 5,
     "sample_count": 1440000,
     "observed_interval_ms": { "p50": 5.1, "p95": 5.4, "max": 41.2 },
@@ -107,12 +115,17 @@ crash mid-write can never leave truncated JSON.
 exceeding 1.5× the requested one, and `skipped_tick_estimate` counts ticks dropped under
 `MissedTickBehavior::Skip`. The two `*_basis` fields exist because intervals are measured on the
 **monotonic** clock while row `timestamp_ms` comes from the **wall** clock — an NTP step moves one
-and not the other, and a consumer aligning them needs to know that.
+and not the other, and a consumer aligning them needs to know that. Percentiles are upper bucket
+edges (100 microseconds through 100 ms, then 1 ms), so they can be slightly above the exact
+`max`. `late_sample_count` and `skipped_tick_estimate` are separate, non-additive indicators: a
+single delayed interval can contribute to both.
 
-`timing.sample_count` counts samples acquired by the collector. If
+`timing.scope` is `latest_process`: after a collector restart, timing describes that process only,
+while the rest of the manifest keeps the session identity. `timing.sample_count` counts samples
+acquired by the collector. If
 `parquet_write_failures` is nonzero, one or more acquired batches were not persisted, so consumers
-must account for that data loss. `ended_at_utc` marks when collection stopped, before any remaining
-batch writes are drained.
+must account for that data loss; this total is retained across restarts. `ended_at_utc` marks when
+collection stopped, before any remaining batch writes are drained.
 
 `workload.class` defaults to `gaming`; override with `WORKLOAD_CLASS`.
 

@@ -310,22 +310,33 @@ async fn perform_shutdown(
 async fn main() -> Result<()> {
     let _sentry_guard = init_sentry();
 
-    let session_label = session::resolve_label();
+    let mut session_label = session::resolve_label();
 
     let nvml = Nvml::init()?;
     let device = nvml.device_by_index(0)?; // Target first GPU
 
     // Configurable poll interval via environment variable
-    let poll_interval_ms: u64 = std::env::var("POLL_INTERVAL_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
+    let poll_interval_ms =
+        session::parse_poll_interval_ms(std::env::var("POLL_INTERVAL_MS").ok().as_deref())?;
 
     let output_dir = session::resolve_dir()?;
+    let _session_lock = session::acquire_exclusive(&output_dir)?;
     let started_at = Utc::now();
     let session_id = session::session_id(
         &session_label,
         &started_at.format("%Y%m%dT%H%M%S%.fZ").to_string(),
+    );
+
+    // Do not attach a new manifest to legacy batches that have no manifest to
+    // describe their provenance. Operators must migrate or separate that data.
+    let mut batch_counter = session::highest_batch_id(&output_dir)?;
+    anyhow::ensure!(
+        batch_counter == 0 || SessionManifest::load(&output_dir)?.is_some(),
+        "SESSION_DIR contains existing telemetry batches but no valid session manifest; use a new directory or restore the manifest"
+    );
+    anyhow::ensure!(
+        batch_counter < u32::MAX,
+        "batch ID namespace exhausted; start a new SESSION_DIR"
     );
 
     let host = HostInfo::new(device.name().ok(), nvml.sys_driver_version().ok());
@@ -336,18 +347,14 @@ async fn main() -> Result<()> {
         started_at,
         poll_interval_ms,
         host,
-    );
+    )?;
+    // A restarted directory remains one labeled workload/session. Preserve the
+    // established identity instead of writing new batches with a conflicting tag.
+    session_label = manifest.session_label.clone();
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut interval = interval(Duration::from_millis(poll_interval_ms));
     // After write backpressure, do not burst-catch every missed 5ms tick.
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Resume numbering so a restart in a populated directory cannot overwrite
-    // batch 1.
-    let mut batch_counter = session::highest_batch_id(&output_dir)?;
-    anyhow::ensure!(
-        batch_counter < u32::MAX,
-        "batch ID namespace exhausted; start a new SESSION_DIR"
-    );
     // Publish only after the fallible resume scan succeeds, so an unreadable
     // existing directory cannot overwrite its prior completed manifest.
     manifest.write_atomic(&output_dir)?;
@@ -374,8 +381,7 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
-            tick = interval.tick() => {
-                timing.record(tick.into_std());
+            _tick = interval.tick() => {
 
                 let power_usage = device.power_usage().unwrap_or(0);
                 let temperature = device.temperature(TemperatureSensor::Gpu).unwrap_or(0);
@@ -419,6 +425,10 @@ async fn main() -> Result<()> {
                     cpu_ccd2_c,
                     cpu_package_power_w,
                 };
+
+                // Measure when telemetry was actually obtained, not the Tokio
+                // scheduler's nominal deadline. This includes collection stalls.
+                timing.record(std::time::Instant::now());
 
                 buffer.push(sample);
 

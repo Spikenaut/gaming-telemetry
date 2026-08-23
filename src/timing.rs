@@ -46,6 +46,9 @@ pub struct IntervalPercentiles {
 /// Serializable timing summary embedded in the session manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimingSummary {
+    /// Timing values describe only the latest collector process after a restart.
+    #[serde(default = "timing_scope_default")]
+    pub scope: String,
     pub poll_interval_ms_requested: u64,
     pub sample_count: u64,
     pub observed_interval_ms: IntervalPercentiles,
@@ -55,6 +58,10 @@ pub struct TimingSummary {
     pub elapsed_basis: String,
     /// Clock used for the `timestamp_ms` column in the Parquet batches.
     pub row_timestamp_basis: String,
+}
+
+fn timing_scope_default() -> String {
+    "latest_process".to_owned()
 }
 
 /// Bounded-memory tracker for inter-sample intervals.
@@ -93,7 +100,11 @@ impl TimingStats {
     pub fn record(&mut self, now: Instant) {
         self.sample_count += 1;
         if let Some(previous) = self.last {
-            let delta_us = now.duration_since(previous).as_micros() as u64;
+            let delta_us = now
+                .duration_since(previous)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX);
             self.record_interval_us(delta_us);
         }
         self.last = Some(now);
@@ -179,6 +190,7 @@ impl TimingStats {
 
     pub fn summary(&self) -> TimingSummary {
         TimingSummary {
+            scope: timing_scope_default(),
             poll_interval_ms_requested: self.requested_ms,
             sample_count: self.sample_count,
             observed_interval_ms: IntervalPercentiles {
@@ -310,6 +322,7 @@ mod tests {
     #[test]
     fn summary_declares_its_clock_bases() {
         let summary = TimingStats::new(5).summary();
+        assert_eq!(summary.scope, "latest_process");
         assert_eq!(summary.elapsed_basis, "monotonic");
         assert_eq!(summary.row_timestamp_basis, "wall_clock_utc");
     }

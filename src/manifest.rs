@@ -12,6 +12,8 @@ use crate::timing::TimingSummary;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Sidecar filename inside the session directory.
@@ -97,7 +99,7 @@ pub struct SessionManifest {
     pub restart_count: u32,
     pub host: HostInfo,
     pub workload: Workload,
-    /// Number of Parquet batches that failed during this process run. A nonzero
+    /// Total Parquet batches that failed during this session. A nonzero
     /// value means timing sample_count can exceed rows available on disk.
     #[serde(default)]
     pub parquet_write_failures: u32,
@@ -109,7 +111,7 @@ fn manifest_path(dir: &Path) -> PathBuf {
 }
 
 fn temp_path(dir: &Path) -> PathBuf {
-    dir.join(format!("{MANIFEST_FILENAME}.tmp"))
+    dir.join(format!("{MANIFEST_FILENAME}.{}.tmp", std::process::id()))
 }
 
 impl SessionManifest {
@@ -138,21 +140,47 @@ impl SessionManifest {
         }
     }
 
-    /// Read an existing manifest from `dir`, if one is present and parseable.
-    pub fn load(dir: &Path) -> Option<Self> {
-        let contents = std::fs::read_to_string(manifest_path(dir)).ok()?;
-        serde_json::from_str(&contents).ok()
+    /// Read an existing manifest. An absent file is normal; malformed or
+    /// unsupported manifests must stop the collector rather than being silently
+    /// overwritten as a new session.
+    pub fn load(dir: &Path) -> Result<Option<Self>> {
+        let path = manifest_path(dir);
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to read {}",
+                        crate::privacy::redact_personal_path(&path.display().to_string())
+                    )
+                });
+            }
+        };
+        let manifest: Self = serde_json::from_str(&contents).with_context(|| {
+            format!(
+                "failed to parse {}",
+                crate::privacy::redact_personal_path(&path.display().to_string())
+            )
+        })?;
+        anyhow::ensure!(
+            manifest.schema_version == SCHEMA_VERSION,
+            "unsupported session manifest schema_version {}; expected {}",
+            manifest.schema_version,
+            SCHEMA_VERSION
+        );
+        Ok(Some(manifest))
     }
 
     /// Build the manifest for a run, adopting any prior manifest in the same
     /// directory.
     ///
     /// Restarting a collector into an existing session directory continues that
-    /// session rather than starting a new one: the original `session_id` and
-    /// `started_at_utc` are preserved, `ended_at_utc` is cleared because the
-    /// session is live again, and `restart_count` increments. Anything else
-    /// (version, git SHA, host, poll interval) is refreshed from the current
-    /// process, since those describe the run that is writing now.
+    /// session rather than starting a new one: its identity, workload, label,
+    /// and cumulative persistence failures are preserved, `ended_at_utc` is
+    /// cleared because the session is live again, and `restart_count`
+    /// increments. Run-specific values (version, git SHA, host, poll interval)
+    /// are refreshed from the current process.
     pub fn load_or_new(
         dir: &Path,
         session_id: String,
@@ -160,7 +188,7 @@ impl SessionManifest {
         started_at_utc: DateTime<Utc>,
         poll_interval_ms_requested: u64,
         host: HostInfo,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut manifest = Self::new(
             session_id,
             session_label,
@@ -168,12 +196,15 @@ impl SessionManifest {
             poll_interval_ms_requested,
             host,
         );
-        if let Some(previous) = Self::load(dir) {
+        if let Some(previous) = Self::load(dir)? {
             manifest.session_id = previous.session_id;
             manifest.started_at_utc = previous.started_at_utc;
             manifest.restart_count = previous.restart_count.saturating_add(1);
+            manifest.session_label = previous.session_label;
+            manifest.workload = previous.workload;
+            manifest.parquet_write_failures = previous.parquet_write_failures;
         }
-        manifest
+        Ok(manifest)
     }
 
     /// Stamp when collection stopped and attach the timing/persistence summary.
@@ -185,7 +216,9 @@ impl SessionManifest {
     ) {
         self.ended_at_utc = Some(ended_at_utc);
         self.timing = Some(timing);
-        self.parquet_write_failures = parquet_write_failures;
+        self.parquet_write_failures = self
+            .parquet_write_failures
+            .saturating_add(parquet_write_failures);
     }
 
     /// Serialize to `session_manifest.json` via a temp file and rename.
@@ -195,18 +228,44 @@ impl SessionManifest {
     pub fn write_atomic(&self, dir: &Path) -> Result<()> {
         let tmp = temp_path(dir);
         let json = serde_json::to_string_pretty(self).context("failed to serialize manifest")?;
-        std::fs::write(&tmp, json.as_bytes()).with_context(|| {
-            format!(
-                "failed to write {}",
-                crate::privacy::redact_personal_path(&tmp.display().to_string())
-            )
-        })?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| {
+                format!(
+                    "failed to create {}",
+                    crate::privacy::redact_personal_path(&tmp.display().to_string())
+                )
+            })?;
+        if let Err(error) = file
+            .write_all(json.as_bytes())
+            .and_then(|_| file.sync_all())
+        {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to write {}",
+                    crate::privacy::redact_personal_path(&tmp.display().to_string())
+                )
+            });
+        }
+        drop(file);
         std::fs::rename(&tmp, manifest_path(dir)).with_context(|| {
             format!(
                 "failed to finalize {}",
                 crate::privacy::redact_personal_path(&manifest_path(dir).display().to_string())
             )
         })?;
+        File::open(dir)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| {
+                format!(
+                    "failed to persist manifest rename in {}",
+                    crate::privacy::redact_personal_path(&dir.display().to_string())
+                )
+            })?;
         Ok(())
     }
 }
@@ -293,10 +352,12 @@ mod tests {
         let path = dir.join(MANIFEST_FILENAME);
         assert!(path.is_file());
         assert!(
-            !dir.join(format!("{MANIFEST_FILENAME}.tmp")).exists(),
+            !temp_path(&dir).exists(),
             "temp file must not survive a successful write"
         );
-        let reloaded = SessionManifest::load(&dir).expect("manifest should parse");
+        let reloaded = SessionManifest::load(&dir)
+            .expect("manifest should load")
+            .expect("manifest should exist");
         assert_eq!(reloaded.session_id, "s1");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -312,7 +373,7 @@ mod tests {
         manifest.finalize(Utc::now(), stats.summary(), 0);
         manifest.write_atomic(&dir).unwrap();
 
-        let reloaded = SessionManifest::load(&dir).unwrap();
+        let reloaded = SessionManifest::load(&dir).unwrap().unwrap();
         assert!(reloaded.ended_at_utc.is_some());
         let timing = reloaded.timing.expect("timing summary should be attached");
         assert_eq!(timing.poll_interval_ms_requested, 5);
@@ -327,7 +388,8 @@ mod tests {
         let dir = temp_dir("restart");
         let mut first = fixture("original_id");
         let original_start = first.started_at_utc;
-        first.finalize(Utc::now(), TimingStats::new(5).summary(), 0);
+        first.parquet_write_failures = 2;
+        first.finalize(Utc::now(), TimingStats::new(5).summary(), 1);
         first.write_atomic(&dir).unwrap();
 
         // A later process resolves a different id/start, but the directory already
@@ -335,11 +397,12 @@ mod tests {
         let second = SessionManifest::load_or_new(
             &dir,
             "some_other_id".to_owned(),
-            "kcd2".to_owned(),
+            "different_label".to_owned(),
             Utc::now(),
             5,
             HostInfo::new(None, None),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             second.session_id, "original_id",
@@ -350,6 +413,9 @@ mod tests {
             "session start must be preserved across restarts"
         );
         assert_eq!(second.restart_count, 1);
+        assert_eq!(second.session_label, "kcd2");
+        assert_eq!(second.workload.label, "kcd2");
+        assert_eq!(second.parquet_write_failures, 3);
         assert_eq!(
             second.ended_at_utc, None,
             "a restarted session is live again"
@@ -363,14 +429,15 @@ mod tests {
             Utc::now(),
             5,
             HostInfo::new(None, None),
-        );
+        )
+        .unwrap();
         assert_eq!(third.restart_count, 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn load_or_new_starts_fresh_when_directory_is_empty_or_corrupt() {
+    fn load_or_new_starts_fresh_when_directory_is_empty_but_rejects_corruption() {
         let dir = temp_dir("fresh");
         let fresh = SessionManifest::load_or_new(
             &dir,
@@ -379,22 +446,30 @@ mod tests {
             Utc::now(),
             5,
             HostInfo::new(None, None),
-        );
+        )
+        .unwrap();
         assert_eq!(fresh.session_id, "new_id");
         assert_eq!(fresh.restart_count, 0);
 
-        // A truncated manifest must not wedge the collector — it starts a new one.
+        // A truncated manifest must not be replaced silently: the existing data
+        // could be a real, interrupted session that needs operator recovery.
         std::fs::write(dir.join(MANIFEST_FILENAME), b"{\"schema_vers").unwrap();
-        let after_corrupt = SessionManifest::load_or_new(
+        assert!(SessionManifest::load_or_new(
             &dir,
             "new_id2".to_owned(),
             "re2r".to_owned(),
             Utc::now(),
             5,
             HostInfo::new(None, None),
-        );
-        assert_eq!(after_corrupt.session_id, "new_id2");
-        assert_eq!(after_corrupt.restart_count, 0);
+        )
+        .is_err());
+
+        std::fs::write(
+            dir.join(MANIFEST_FILENAME),
+            serde_json::json!({ "schema_version": SCHEMA_VERSION + 1 }).to_string(),
+        )
+        .unwrap();
+        assert!(SessionManifest::load(&dir).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
