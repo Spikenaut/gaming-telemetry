@@ -14,7 +14,8 @@ pub fn collector_version() -> &'static str {
 pub fn git_sha() -> String {
     if let Some(value) = std::env::var("AGENTOS_GIT_SHA")
         .ok()
-        .filter(|value| !value.trim().is_empty())
+        .map(|v| v.trim().to_owned())
+        .filter(|value| !value.is_empty())
     {
         return value;
     }
@@ -41,5 +42,19 @@ mod tests {
         // Whatever branch is taken (env, git, fallback), the value is usable as a
         // manifest field.
         assert!(!git_sha().trim().is_empty());
+    }
+
+    #[test]
+    fn git_sha_trims_agentos_env_var() {
+        // Set env var with leading and trailing whitespace
+        std::env::set_var("AGENTOS_GIT_SHA", "  abc123  ");
+
+        let result = git_sha();
+
+        // Clean up
+        std::env::remove_var("AGENTOS_GIT_SHA");
+
+        // Should return trimmed value
+        assert_eq!(result, "abc123");
     }
 }
