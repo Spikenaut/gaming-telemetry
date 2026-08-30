@@ -31,7 +31,7 @@ MangoHud (or any overlay) is **not** recorded. You may still run it yourself for
 
 - **OS**: Linux (developed on Fedora)
 - **GPU**: NVIDIA with NVML (RTX 50-series preferred)
-- **Build**: Rust / Cargo
+- **Build**: Rust 1.98+ / Cargo
 
 ## Usage
 
