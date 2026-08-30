@@ -1,0 +1,21 @@
+.github/workflows/qodana_code_quality.yml
+  s_bae65205ae4b78::t_94d2d05b6faff8 14,18,22,24,29
+qodana.yaml
+  s_bae65205ae4b78::t_6fc3d4d800da90 10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "4ac5790c9ddfe63a77aace3ac075928d13297d28",
+  "prompts": {},
+  "sessions": {
+    "s_bae65205ae4b78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a023cb-3761-7c01-a06a-8e8f23cab145",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
