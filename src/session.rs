@@ -3,6 +3,7 @@
 //! Session directory, label, and batch-numbering helpers.
 
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -36,25 +37,6 @@ pub struct SessionLock {
     _file: File,
 }
 
-#[cfg(unix)]
-mod flock {
-    use std::fs::File;
-    use std::os::unix::io::AsRawFd;
-
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
-
-    unsafe extern "C" {
-        fn flock(fd: i32, operation: i32) -> i32;
-    }
-
-    pub fn try_exclusive(file: &File) -> bool {
-        // `file` remains owned by SessionLock for the duration of the process,
-        // so the kernel-held advisory lock cannot be released early.
-        unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) == 0 }
-    }
-}
-
 /// Acquire exclusive ownership of `dir` for one collector process.
 pub fn acquire_exclusive(dir: &Path) -> Result<SessionLock> {
     let path = dir.join(".gaming-telemetry.lock");
@@ -71,16 +53,12 @@ pub fn acquire_exclusive(dir: &Path) -> Result<SessionLock> {
             )
         })?;
 
-    #[cfg(unix)]
-    if !flock::try_exclusive(&file) {
-        bail!(
+    file.try_lock_exclusive().with_context(|| {
+        format!(
             "another collector already holds the session lock for {}",
             crate::privacy::redact_personal_path(&dir.display().to_string())
-        );
-    }
-
-    #[cfg(not(unix))]
-    bail!("exclusive session locking is currently supported on Unix only");
+        )
+    })?;
 
     Ok(SessionLock { _file: file })
 }

@@ -276,46 +276,53 @@ impl SessionManifest {
     pub fn write_atomic(&self, dir: &Path) -> Result<()> {
         let tmp = temp_path(dir);
         let json = serde_json::to_string_pretty(self).context("failed to serialize manifest")?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .with_context(|| {
-                format!(
-                    "failed to create {}",
-                    crate::privacy::redact_personal_path(&tmp.display().to_string())
-                )
-            })?;
-        if let Err(error) = file
-            .write_all(json.as_bytes())
-            .and_then(|_| file.sync_all())
-        {
-            drop(file);
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to write {}",
-                    crate::privacy::redact_personal_path(&tmp.display().to_string())
-                )
-            });
-        }
-        drop(file);
-        std::fs::rename(&tmp, manifest_path(dir)).with_context(|| {
+        write_temp_manifest(&tmp, &json)?;
+        publish_manifest(&tmp, dir)
+    }
+}
+
+fn write_temp_manifest(tmp: &Path, json: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
+        .with_context(|| {
             format!(
-                "failed to finalize {}",
-                crate::privacy::redact_personal_path(&manifest_path(dir).display().to_string())
+                "failed to create {}",
+                crate::privacy::redact_personal_path(&tmp.display().to_string())
             )
         })?;
-        File::open(dir)
-            .and_then(|directory| directory.sync_all())
-            .with_context(|| {
-                format!(
-                    "failed to persist manifest rename in {}",
-                    crate::privacy::redact_personal_path(&dir.display().to_string())
-                )
-            })?;
-        Ok(())
+    if let Err(error) = file
+        .write_all(json.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
+        let _ = std::fs::remove_file(tmp);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to write {}",
+                crate::privacy::redact_personal_path(&tmp.display().to_string())
+            )
+        });
     }
+    Ok(())
+}
+
+fn publish_manifest(tmp: &Path, dir: &Path) -> Result<()> {
+    std::fs::rename(tmp, manifest_path(dir)).with_context(|| {
+        format!(
+            "failed to finalize {}",
+            crate::privacy::redact_personal_path(&manifest_path(dir).display().to_string())
+        )
+    })?;
+    File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| {
+            format!(
+                "failed to persist manifest rename in {}",
+                crate::privacy::redact_personal_path(&dir.display().to_string())
+            )
+        })
 }
 
 impl From<&SessionManifest> for PriorRun {
@@ -492,6 +499,22 @@ mod tests {
             "a restarted session is live again"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_restart_accumulates_prior_runs() {
+        let dir = temp_dir("repeated_restart");
+        fixture("original_id").write_atomic(&dir).unwrap();
+        let second = SessionManifest::load_or_new(
+            &dir,
+            "ignored".to_owned(),
+            "kcd2".to_owned(),
+            Utc::now(),
+            5,
+            HostInfo::new(None, None),
+        )
+        .unwrap();
         second.write_atomic(&dir).unwrap();
         let third = SessionManifest::load_or_new(
             &dir,
