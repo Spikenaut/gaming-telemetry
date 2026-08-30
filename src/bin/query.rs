@@ -2,11 +2,8 @@
 
 use anyhow::{Context, Result};
 use duckdb::Connection;
+use gaming_telemetry::privacy::redact_personal_path;
 use std::env;
-
-#[path = "../privacy.rs"]
-mod privacy;
-use privacy::redact_personal_path;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();

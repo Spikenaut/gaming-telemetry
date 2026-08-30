@@ -25,10 +25,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Session manifest** (`session_manifest.json`, `schema_version: 1`) written into every
+  capture directory: session id/label, start and end timestamps, requested poll interval,
+  collector version, git commit, host GPU/driver/CPU model, and workload class
+  ([#22](https://github.com/rmems/gaming-telemetry/issues/22))
+- **Timing-quality statistics** in the manifest — observed inter-sample interval p50/p95/max,
+  late-sample and skipped-tick counts, and explicit monotonic-vs-wall-clock basis fields, so a
+  consumer can tell whether a nominal 5 ms stream actually behaved like one
+  ([#22](https://github.com/rmems/gaming-telemetry/issues/22))
+- **`SESSION_DIR`** environment variable: the collector creates and owns the session
+  directory instead of requiring the operator to `cd` into it. Unset preserves the previous
+  write-to-cwd behavior ([#22](https://github.com/rmems/gaming-telemetry/issues/22))
+- **`WORKLOAD_CLASS`** environment variable, defaulting to `gaming`
 - `session_label` on every Parquet row, set via the `SESSION_LABEL` environment
   variable, so multi-title capture sessions can be separated downstream
   ([#20](https://github.com/rmems/gaming-telemetry/issues/20),
   [#21](https://github.com/rmems/gaming-telemetry/pull/21))
+
+### Fixed
+
+- **Restarting the collector in a populated session directory no longer overwrites
+  `gpu_telemetry_v2_batch_1.parquet`.** Batch numbering resumes from the highest existing
+  batch, parsed numerically rather than lexicographically (`batch_10` sorted before `batch_2`).
+  A restart also continues the existing session — preserving `session_id` and
+  `started_at_utc` while incrementing `restart_count` — instead of starting a new one
+  ([#22](https://github.com/rmems/gaming-telemetry/issues/22))
 
 ### Removed
 
