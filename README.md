@@ -89,14 +89,17 @@ never publish truncated JSON.
   "session_id": "kcd2_20260816_101500",
   "session_label": "kcd2",
   "started_at_utc": "2026-08-16T10:15:00.123Z",
+  "run_started_at_utc": "2026-08-16T10:15:00.123Z",
   "ended_at_utc": "2026-08-16T11:02:31.887Z",
   "poll_interval_ms_requested": 5,
   "collector_version": "0.1.0",
   "git_commit": "54f5b74",
   "restart_count": 0,
+  "unclean_restart_count": 0,
   "host": { "gpu_name": "NVIDIA GeForce RTX 5080", "driver": "580.00", "cpu_model": "…" },
   "workload": { "class": "gaming", "label": "kcd2" },
   "parquet_write_failures": 0,
+  "prior_runs": [],
   "timing": {
     "scope": "latest_process",
     "poll_interval_ms_requested": 5,
@@ -120,9 +123,13 @@ edges (100 microseconds through 100 ms, then 1 ms), so they can be slightly abov
 `max`. `late_sample_count` and `skipped_tick_estimate` are separate, non-additive indicators: a
 single delayed interval can contribute to both.
 
-`timing.scope` is `latest_process`: after a collector restart, timing describes that process only,
-while the rest of the manifest keeps the session identity. `timing.sample_count` counts samples
-acquired by the collector. If
+`timing.scope` is `latest_process`: after a collector restart, timing describes that process only.
+`run_started_at_utc` and the root version, build, host, and polling fields describe the current
+process. Every earlier process is retained in `prior_runs` with its corresponding metadata and
+timing summary, so a session with changed hardware, build, or poll interval remains reproducible.
+`unclean_restart_count` records prior processes that did not finalize the manifest, which means
+their in-memory tail may not have been published. `timing.sample_count` counts samples acquired by
+the collector. If
 `parquet_write_failures` is nonzero, one or more acquired batches were not persisted, so consumers
 must account for that data loss; this total is retained across restarts. `ended_at_utc` marks when
 collection stopped, before any remaining batch writes are drained.

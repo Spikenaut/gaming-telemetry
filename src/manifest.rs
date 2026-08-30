@@ -73,6 +73,21 @@ pub struct Workload {
     pub label: String,
 }
 
+/// Metadata preserved for a collector process that previously wrote to this
+/// session directory. It keeps resumed sessions reproducible without changing
+/// the session-level identity fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PriorRun {
+    pub run_started_at_utc: Option<DateTime<Utc>>,
+    pub ended_at_utc: Option<DateTime<Utc>>,
+    pub poll_interval_ms_requested: u64,
+    pub collector_version: String,
+    pub git_commit: String,
+    pub host: HostInfo,
+    pub workload: Workload,
+    pub timing: Option<TimingSummary>,
+}
+
 impl Workload {
     pub fn new(label: &str) -> Self {
         let class = std::env::var("WORKLOAD_CLASS")
@@ -93,6 +108,10 @@ pub struct SessionManifest {
     pub session_id: String,
     pub session_label: String,
     pub started_at_utc: DateTime<Utc>,
+    /// Start time of this collector process. `started_at_utc` remains the
+    /// stable identity timestamp for the overall session.
+    #[serde(default)]
+    pub run_started_at_utc: Option<DateTime<Utc>>,
     pub ended_at_utc: Option<DateTime<Utc>>,
     pub poll_interval_ms_requested: u64,
     pub collector_version: String,
@@ -100,6 +119,9 @@ pub struct SessionManifest {
     /// How many collector processes have written into this directory. 0 on the
     /// first run.
     pub restart_count: u32,
+    /// Number of prior processes that ended without finalizing the manifest.
+    #[serde(default)]
+    pub unclean_restart_count: u32,
     pub host: HostInfo,
     pub workload: Workload,
     /// Total Parquet batches that failed during this session. A nonzero
@@ -107,6 +129,9 @@ pub struct SessionManifest {
     #[serde(default)]
     pub parquet_write_failures: u32,
     pub timing: Option<TimingSummary>,
+    /// Metadata for every earlier collector process in this session.
+    #[serde(default)]
+    pub prior_runs: Vec<PriorRun>,
 }
 
 fn manifest_path(dir: &Path) -> PathBuf {
@@ -140,15 +165,18 @@ impl SessionManifest {
             session_id,
             session_label,
             started_at_utc,
+            run_started_at_utc: Some(started_at_utc),
             ended_at_utc: None,
             poll_interval_ms_requested,
             collector_version: crate::build_info::collector_version().to_owned(),
             git_commit: crate::build_info::git_sha(),
             restart_count: 0,
+            unclean_restart_count: 0,
             host,
             workload,
             parquet_write_failures: 0,
             timing: None,
+            prior_runs: Vec::new(),
         }
     }
 
@@ -189,10 +217,12 @@ impl SessionManifest {
     ///
     /// Restarting a collector into an existing session directory continues that
     /// session rather than starting a new one: its identity, workload, label,
-    /// and cumulative persistence failures are preserved, `ended_at_utc` is
-    /// cleared because the session is live again, and `restart_count`
-    /// increments. Run-specific values (version, git SHA, host, poll interval)
-    /// are refreshed from the current process.
+    /// and cumulative persistence failures are preserved. Metadata for the
+    /// prior process is appended to `prior_runs`, and an unfinished prior
+    /// process increments `unclean_restart_count`. `ended_at_utc` is cleared
+    /// because the session is live again, and `restart_count` increments.
+    /// Run-specific values (version, git SHA, host, poll interval) describe
+    /// the current process.
     pub fn load_or_new(
         dir: &Path,
         session_id: String,
@@ -209,12 +239,18 @@ impl SessionManifest {
             host,
         );
         if let Some(previous) = Self::load(dir)? {
+            let prior_run = PriorRun::from(&previous);
             manifest.session_id = previous.session_id;
             manifest.started_at_utc = previous.started_at_utc;
             manifest.restart_count = previous.restart_count.saturating_add(1);
+            manifest.unclean_restart_count = previous
+                .unclean_restart_count
+                .saturating_add(u32::from(previous.ended_at_utc.is_none()));
             manifest.session_label = previous.session_label;
             manifest.workload = previous.workload;
             manifest.parquet_write_failures = previous.parquet_write_failures;
+            manifest.prior_runs = previous.prior_runs;
+            manifest.prior_runs.push(prior_run);
         }
         Ok(manifest)
     }
@@ -279,6 +315,21 @@ impl SessionManifest {
                 )
             })?;
         Ok(())
+    }
+}
+
+impl From<&SessionManifest> for PriorRun {
+    fn from(manifest: &SessionManifest) -> Self {
+        Self {
+            run_started_at_utc: manifest.run_started_at_utc,
+            ended_at_utc: manifest.ended_at_utc,
+            poll_interval_ms_requested: manifest.poll_interval_ms_requested,
+            collector_version: manifest.collector_version.clone(),
+            git_commit: manifest.git_commit.clone(),
+            host: manifest.host.clone(),
+            workload: manifest.workload.clone(),
+            timing: manifest.timing.clone(),
+        }
     }
 }
 
@@ -352,6 +403,8 @@ mod tests {
         assert_eq!(parsed.ended_at_utc, None);
         assert_eq!(parsed.timing, None);
         assert_eq!(parsed.restart_count, 0);
+        assert_eq!(parsed.unclean_restart_count, 0);
+        assert_eq!(parsed.prior_runs, Vec::new());
         assert_eq!(parsed.workload.class, "gaming");
         assert_eq!(parsed.workload.label, "kcd2");
     }
@@ -425,9 +478,15 @@ mod tests {
             "session start must be preserved across restarts"
         );
         assert_eq!(second.restart_count, 1);
+        assert_eq!(second.unclean_restart_count, 0);
         assert_eq!(second.session_label, "kcd2");
         assert_eq!(second.workload.label, "kcd2");
         assert_eq!(second.parquet_write_failures, 3);
+        assert_eq!(second.prior_runs.len(), 1);
+        let prior = &second.prior_runs[0];
+        assert_eq!(prior.poll_interval_ms_requested, 5);
+        assert_eq!(prior.workload.label, "kcd2");
+        assert_eq!(prior.ended_at_utc, first.ended_at_utc);
         assert_eq!(
             second.ended_at_utc, None,
             "a restarted session is live again"
@@ -444,6 +503,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(third.restart_count, 2);
+        assert_eq!(third.prior_runs.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restart_records_an_unclean_prior_process() {
+        let dir = temp_dir("unclean_restart");
+        let first = fixture("original_id");
+        first.write_atomic(&dir).unwrap();
+
+        let second = SessionManifest::load_or_new(
+            &dir,
+            "ignored".to_owned(),
+            "kcd2".to_owned(),
+            Utc::now(),
+            50,
+            HostInfo::new(None, None),
+        )
+        .unwrap();
+
+        assert_eq!(second.unclean_restart_count, 1);
+        assert_eq!(second.prior_runs.len(), 1);
+        assert_eq!(second.prior_runs[0].ended_at_utc, None);
+        assert_eq!(second.prior_runs[0].poll_interval_ms_requested, 5);
+        assert_eq!(second.poll_interval_ms_requested, 50);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

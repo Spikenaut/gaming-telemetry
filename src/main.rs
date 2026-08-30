@@ -190,6 +190,7 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -
         let _ = remove_file(&temporary);
         return Err(error.into());
     }
+    File::open(output_dir)?.sync_all()?;
 
     println!(
         "Wrote batch {} to {}",
