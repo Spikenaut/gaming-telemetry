@@ -1,25 +1,7 @@
-README.md
-  s_7dd600270e93e1::t_18d0b1d9d2c9a8 34
-.github/workflows/ci.yml
-  s_7dd600270e93e1::t_150c64959189ac 21,32,57
-  s_7dd600270e93e1::t_f2aaa83cf21239 42-43,81-82
-Cargo.toml
-  s_7dd600270e93e1::t_d4d8415774231c 5
-  s_7dd600270e93e1::t_9330f070a8131c 6
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.5.2",
   "base_commit_sha": "6982b04d543be46b5e502fefd33e905bee1cbd0d",
-  "prompts": {},
-  "sessions": {
-    "s_7dd600270e93e1": {
-      "agent_id": {
-        "tool": "codex",
-        "id": "01a053b1-1217-77c1-b598-7ba4cc1ffda6",
-        "model": "gpt-5.3-codex-spark"
-      },
-      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
-    }
-  }
+  "prompts": {}
 }
