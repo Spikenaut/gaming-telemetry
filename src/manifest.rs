@@ -309,12 +309,15 @@ fn write_temp_manifest(tmp: &Path, json: &str) -> Result<()> {
 }
 
 fn publish_manifest(tmp: &Path, dir: &Path) -> Result<()> {
-    std::fs::rename(tmp, manifest_path(dir)).with_context(|| {
-        format!(
-            "failed to finalize {}",
-            crate::privacy::redact_personal_path(&manifest_path(dir).display().to_string())
-        )
-    })?;
+    if let Err(error) = std::fs::rename(tmp, manifest_path(dir)) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to finalize {}",
+                crate::privacy::redact_personal_path(&manifest_path(dir).display().to_string())
+            )
+        });
+    }
     File::open(dir)
         .and_then(|directory| directory.sync_all())
         .with_context(|| {
@@ -371,6 +374,21 @@ mod tests {
         )
     }
 
+    fn manifest_temp_files(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(MANIFEST_FILENAME) && name.ends_with(".tmp")
+                    })
+            })
+            .collect()
+    }
+
     #[test]
     fn parse_cpu_model_extracts_the_model_name_line() {
         let cpuinfo = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 9 7950X 16-Core Processor\ncpu MHz\t: 4500.000\n";
@@ -423,14 +441,26 @@ mod tests {
 
         let path = dir.join(MANIFEST_FILENAME);
         assert!(path.is_file());
-        assert!(
-            !temp_path(&dir).exists(),
+        assert_eq!(
+            manifest_temp_files(&dir),
+            Vec::<PathBuf>::new(),
             "temp file must not survive a successful write"
         );
         let reloaded = SessionManifest::load(&dir)
             .expect("manifest should load")
             .expect("manifest should exist");
         assert_eq!(reloaded.session_id, "s1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_removes_temp_file_when_rename_fails() {
+        let dir = temp_dir("rename_failure");
+        std::fs::create_dir(dir.join(MANIFEST_FILENAME)).unwrap();
+
+        assert!(fixture("s1").write_atomic(&dir).is_err());
+        assert_eq!(manifest_temp_files(&dir), Vec::<PathBuf>::new());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
