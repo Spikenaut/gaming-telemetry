@@ -1,0 +1,19 @@
+src/main.rs
+  s_bae65205ae4b78::t_51d4aed9a04433 380-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d561d6e7777eb1729778818c0c7d228ff7671668",
+  "prompts": {},
+  "sessions": {
+    "s_bae65205ae4b78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a023cb-3761-7c01-a06a-8e8f23cab145",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
