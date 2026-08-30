@@ -15,6 +15,12 @@ pub struct CpuMonitor {
     rapl_path: Option<std::path::PathBuf>,
 }
 
+impl Default for CpuMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuMonitor {
     /// Create a new CpuMonitor with discovered paths.
     pub fn new() -> Self {

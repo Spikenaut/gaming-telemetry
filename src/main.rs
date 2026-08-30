@@ -1,45 +1,22 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-mod cpu;
-mod privacy;
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use cpu::CpuMonitor;
+use gaming_telemetry::build_info::git_sha;
+use gaming_telemetry::cpu::CpuMonitor;
+use gaming_telemetry::manifest::{HostInfo, SessionManifest};
+use gaming_telemetry::privacy;
+use gaming_telemetry::session;
+use gaming_telemetry::timing::TimingStats;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::Nvml;
 use polars::prelude::*;
 use sentry::ClientInitGuard;
 use std::borrow::Cow;
-use std::fs::File;
+use std::fs::{remove_file, rename, File};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tokio::task::JoinSet;
 use tokio::time::{interval, Duration, MissedTickBehavior};
-
-fn git_sha() -> String {
-    if let Some(value) = std::env::var("AGENTOS_GIT_SHA")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        return value;
-    }
-    // For dev runs from source checkout, use local git. In packaged binaries run from
-    // arbitrary CWDs, prefer SENTRY_RELEASE or AGENTOS_GIT_SHA (set by CI) to avoid
-    // deriving from launch directory (see P2 feedback).
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-    {
-        if output.status.success() {
-            let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !sha.is_empty() {
-                return sha;
-            }
-        }
-    }
-    "unknown".to_owned()
-}
 
 fn resolve_sentry_release(git_sha: &str) -> String {
     if let Some(release) = std::env::var("SENTRY_RELEASE")
@@ -101,32 +78,6 @@ fn init_sentry() -> Option<ClientInitGuard> {
     Some(guard)
 }
 
-/// Keep session tags as short ASCII identifiers (labels only — never used for paths/exec).
-fn sanitize_session_label(raw: &str) -> String {
-    raw.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        .take(64)
-        .collect()
-}
-
-/// Multi-game session tag. Production uses `SESSION_LABEL` only; the optional
-/// `cli_label` parameter is for pure unit tests of sanitization/precedence.
-fn resolve_session_label_from_sources(cli_label: Option<&str>, env_label: Option<&str>) -> String {
-    let cli_filtered = cli_label.map(str::trim).filter(|value| !value.is_empty());
-    let env_filtered = env_label.map(str::trim).filter(|value| !value.is_empty());
-    let raw = cli_filtered.or(env_filtered).unwrap_or("");
-    sanitize_session_label(raw)
-}
-
-/// Runtime label resolution. Operators set `SESSION_LABEL` (see README).
-///
-/// CLI argv is intentionally not read here: Codacy flags `std::env::args` as a
-/// security surface, and env alone is enough for multi-title capture. The pure
-/// helper above still accepts an optional CLI-style value for unit tests.
-fn resolve_session_label() -> String {
-    resolve_session_label_from_sources(None, std::env::var("SESSION_LABEL").ok().as_deref())
-}
-
 #[derive(Debug, Clone)]
 struct GpuSample {
     timestamp: DateTime<Utc>,
@@ -154,6 +105,12 @@ struct GpuSample {
 const BUFFER_SIZE: usize = 2000; // ~10 seconds of data at default 5ms intervals
 /// Cap outstanding async Parquet writes so a slow disk cannot queue unbounded batches.
 const MAX_IN_FLIGHT_WRITES: usize = 2;
+
+fn next_batch_id(batch_id: u32) -> Result<u32> {
+    batch_id
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("batch ID namespace exhausted; start a new SESSION_DIR"))
+}
 
 fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -> Result<()> {
     let timestamps: Vec<i64> = samples
@@ -201,11 +158,45 @@ fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -
         "cpu_package_power_w" => cpu_power,
     )?;
 
-    let filename = output_dir.join(format!("gpu_telemetry_v2_batch_{}.parquet", batch_id));
-    let file = File::create(&filename)?;
-    ParquetWriter::new(file).finish(&mut df)?;
+    let filename = output_dir.join(format!(
+        "{}{}{}",
+        session::BATCH_PREFIX,
+        batch_id,
+        session::BATCH_SUFFIX
+    ));
+    // A failed writer must never publish an incomplete file under the final batch
+    // name: restart scanning treats final names as complete batches. The temporary
+    // name cannot match `highest_batch_id` and is published only after a complete,
+    // flushed write.
+    let temporary = output_dir.join(format!(
+        ".{}{}{}.{}.tmp",
+        session::BATCH_PREFIX,
+        batch_id,
+        session::BATCH_SUFFIX,
+        std::process::id()
+    ));
+    let mut file = File::create(&temporary)?;
+    if let Err(error) = (|| -> Result<()> {
+        ParquetWriter::new(&mut file).finish(&mut df)?;
+        file.sync_all()?;
+        Ok(())
+    })() {
+        drop(file);
+        let _ = remove_file(&temporary);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = rename(&temporary, &filename) {
+        let _ = remove_file(&temporary);
+        return Err(error.into());
+    }
+    File::open(output_dir)?.sync_all()?;
 
-    println!("Wrote batch {} to {}", batch_id, filename.display());
+    println!(
+        "Wrote batch {} to {}",
+        batch_id,
+        privacy::redact_personal_path(&filename.display().to_string())
+    );
     Ok(())
 }
 
@@ -270,15 +261,24 @@ async fn drain_in_flight(in_flight: &mut JoinSet<Result<()>>, write_failures: &m
     }
 }
 
+/// Flush the tail buffer, drain outstanding writes, then finalize the manifest.
+///
+/// Both shutdown paths (Ctrl+C, and Ctrl+C during write backpressure) converge
+/// here, so the manifest is finalized and rewritten exactly once per run.
 async fn perform_shutdown(
     buffer: Vec<GpuSample>,
     batch_counter: u32,
     output_dir: &Path,
     in_flight: &mut JoinSet<Result<()>>,
     write_failures: &mut u32,
+    manifest: &mut SessionManifest,
+    timing: &TimingStats,
 ) -> Result<()> {
+    // This is the last instant the collector may have produced telemetry. Storage
+    // drain can take much longer and must not inflate the capture's end time.
+    let capture_ended_at_utc = Utc::now();
     if !buffer.is_empty() {
-        let new_batch_id = batch_counter + 1;
+        let new_batch_id = next_batch_id(batch_counter)?;
         if let Err(e) = write_to_parquet(buffer, new_batch_id, output_dir) {
             *write_failures += 1;
             let redacted = privacy::redact_personal_path(&format!("{:?}", e));
@@ -287,6 +287,19 @@ async fn perform_shutdown(
         }
     }
     drain_in_flight(in_flight, write_failures).await;
+
+    // Finalize before any failure bail-out: a run that lost batches still deserves
+    // an accurate manifest describing what it acquired and what failed to persist.
+    manifest.finalize(capture_ended_at_utc, timing.summary(), *write_failures);
+    if let Err(e) = manifest.write_atomic(output_dir) {
+        let redacted = privacy::redact_personal_path(&format!("{:?}", e));
+        eprintln!("Failed to finalize session manifest: {}", redacted);
+        sentry::capture_message(&redacted, sentry::Level::Error);
+        // A missing on-disk finalize (`ended_at_utc: null`) is an unclean exit;
+        // do not report graceful success or a zero exit status.
+        return Err(e);
+    }
+
     if *write_failures > 0 {
         anyhow::bail!("Graceful shutdown finished with {write_failures} parquet write failure(s)");
     }
@@ -298,36 +311,82 @@ async fn perform_shutdown(
 async fn main() -> Result<()> {
     let _sentry_guard = init_sentry();
 
-    let session_label = resolve_session_label();
+    let mut session_label = session::resolve_label();
 
     let nvml = Nvml::init()?;
     let device = nvml.device_by_index(0)?; // Target first GPU
 
     // Configurable poll interval via environment variable
-    let poll_interval_ms = std::env::var("POLL_INTERVAL_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
+    let poll_interval_ms =
+        session::parse_poll_interval_ms(std::env::var("POLL_INTERVAL_MS").ok().as_deref())?;
 
-    let output_dir = std::env::current_dir()?;
+    let output_dir = session::resolve_dir()?;
+    let _session_lock = session::acquire_exclusive(&output_dir)?;
+    let started_at = Utc::now();
+    let session_id = session::session_id(
+        &session_label,
+        &started_at.format("%Y%m%dT%H%M%S%.fZ").to_string(),
+    );
+
+    // Do not attach a new manifest to legacy batches that have no manifest to
+    // describe their provenance. Operators must migrate or separate that data.
+    let mut batch_counter = session::highest_batch_id(&output_dir)?;
+    anyhow::ensure!(
+        batch_counter == 0 || SessionManifest::load(&output_dir)?.is_some(),
+        "SESSION_DIR contains existing telemetry batches but no valid session manifest; use a new directory or restore the manifest"
+    );
+    anyhow::ensure!(
+        batch_counter < u32::MAX,
+        "batch ID namespace exhausted; start a new SESSION_DIR"
+    );
+
+    let host = HostInfo::new(device.name().ok(), nvml.sys_driver_version().ok());
+    let mut manifest = SessionManifest::load_or_new(
+        &output_dir,
+        session_id,
+        session_label.clone(),
+        started_at,
+        poll_interval_ms,
+        host,
+    )?;
+    // A restarted directory remains one labeled workload/session. Preserve the
+    // established identity instead of writing new batches with a conflicting tag.
+    session_label = manifest.session_label.clone();
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
-    let mut interval = interval(Duration::from_millis(poll_interval_ms));
-    // After write backpressure, do not burst-catch every missed 5ms tick.
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut batch_counter = 0u32;
+    // Publish only after the fallible resume scan succeeds, so an unreadable
+    // existing directory cannot overwrite its prior completed manifest.
+    manifest.write_atomic(&output_dir)?;
     let mut cpu_monitor = CpuMonitor::new();
+    let mut timing = TimingStats::new(poll_interval_ms);
     let mut in_flight: JoinSet<Result<()>> = JoinSet::new();
     let mut write_failures: u32 = 0;
 
     println!(
-        "Starting GPU telemetry: poll_interval_ms={} session_label={:?}",
-        poll_interval_ms, session_label
+        "Starting GPU telemetry: poll_interval_ms={} session_label={:?} session_id={:?}",
+        poll_interval_ms, session_label, manifest.session_id
     );
+    println!(
+        "Session directory: {}",
+        privacy::redact_personal_path(&output_dir.display().to_string())
+    );
+    if manifest.restart_count > 0 {
+        println!(
+            "Resuming session (restart #{}) from batch {}",
+            manifest.restart_count, batch_counter
+        );
+    }
     println!("Press Ctrl+C to stop gracefully.");
 
+    // Start the schedule only when telemetry polling begins, so startup work
+    // cannot be reported as skipped collection ticks.
+    let mut interval = interval(Duration::from_millis(poll_interval_ms));
+    // After write backpressure, do not burst-catch every missed 5ms tick.
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            _ = interval.tick() => {
+            tick = interval.tick() => {
+                timing.record_scheduled_tick(tick.into_std());
+
                 let power_usage = device.power_usage().unwrap_or(0);
                 let temperature = device.temperature(TemperatureSensor::Gpu).unwrap_or(0);
                 let graphics_clock = device.clock_info(Clock::Graphics).unwrap_or(0);
@@ -371,6 +430,10 @@ async fn main() -> Result<()> {
                     cpu_package_power_w,
                 };
 
+                // Measure when telemetry was actually obtained, not the Tokio
+                // scheduler's nominal deadline. This includes collection stalls.
+                timing.record(std::time::Instant::now());
+
                 buffer.push(sample);
 
                 if buffer.len() >= BUFFER_SIZE {
@@ -382,12 +445,14 @@ async fn main() -> Result<()> {
                             &output_dir,
                             &mut in_flight,
                             &mut write_failures,
+                            &mut manifest,
+                            &timing,
                         ).await?;
                         break;
                     }
                     let samples_to_write =
                         std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
-                    batch_counter += 1;
+                    batch_counter = next_batch_id(batch_counter)?;
                     spawn_parquet_write(
                         &mut in_flight,
                         samples_to_write,
@@ -404,6 +469,8 @@ async fn main() -> Result<()> {
                     &output_dir,
                     &mut in_flight,
                     &mut write_failures,
+                    &mut manifest,
+                    &timing,
                 ).await?;
                 break;
             }
@@ -416,37 +483,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resolve_session_label_from_sources_sanitizes() {
-        assert_eq!(resolve_session_label_from_sources(None, None), "");
-        assert_eq!(resolve_session_label_from_sources(None, Some("")), "");
-        assert_eq!(
-            resolve_session_label_from_sources(None, Some("  kcd2  ")),
-            "kcd2"
-        );
-        assert_eq!(
-            resolve_session_label_from_sources(None, Some("re_requiem")),
-            "re_requiem"
-        );
-        assert_eq!(
-            resolve_session_label_from_sources(None, Some("kcd2;rm -rf /")),
-            "kcd2rm-rf"
-        );
-        assert_eq!(
-            resolve_session_label_from_sources(Some("cli_label"), Some("env_label")),
-            "cli_label",
-            "CLI label should take precedence over env"
-        );
-        assert_eq!(
-            resolve_session_label_from_sources(Some(""), Some("env_label")),
-            "env_label",
-            "Empty CLI label should fallback to env"
-        );
-        let long = "a".repeat(80);
-        assert_eq!(sanitize_session_label(&long).len(), 64);
-        assert_eq!(sanitize_session_label("...ok"), "...ok");
-    }
 
     fn sample_fixture(label: &str) -> GpuSample {
         GpuSample {
@@ -487,7 +523,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         let batch_id = 99_001;
-        let path = tmp.join(format!("gpu_telemetry_v2_batch_{batch_id}.parquet"));
+        let path = tmp.join(format!(
+            "{}{}{}",
+            session::BATCH_PREFIX,
+            batch_id,
+            session::BATCH_SUFFIX
+        ));
         let _ = std::fs::remove_file(&path);
         write_to_parquet(
             vec![sample_fixture("kcd2"), sample_fixture("kcd2")],
@@ -496,6 +537,13 @@ mod tests {
         )
         .expect("parquet write");
         assert!(path.is_file());
+        assert!(
+            std::fs::read_dir(&tmp)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "a successful write publishes only the final batch name"
+        );
 
         // Verify the session_label column is written for every row.
         let df = LazyFrame::scan_parquet(&path, ScanArgsParquet::default())
@@ -506,6 +554,29 @@ mod tests {
         let labels = df.column("session_label").unwrap().str().unwrap();
         assert_eq!(labels.len(), 2);
         assert!(labels.into_iter().all(|opt| opt == Some("kcd2")));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The batch filename the collector writes must be the one `highest_batch_id`
+    /// parses, or restart numbering silently breaks.
+    #[test]
+    fn written_batch_filename_is_discoverable_by_session_scan() {
+        let tmp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-fixtures")
+            .join(format!(
+                "gt_batch_scan_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        write_to_parquet(vec![sample_fixture("kcd2")], 4, &tmp).expect("parquet write");
+        assert_eq!(session::highest_batch_id(&tmp).unwrap(), 4);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
