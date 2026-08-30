@@ -1,0 +1,19 @@
+Cargo.toml
+  s_7dd600270e93e1::t_758875afd13551 17-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "4b18f63b8a67cd714aadcb5cdfe769b7185d0fbb",
+  "prompts": {},
+  "sessions": {
+    "s_7dd600270e93e1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a053b1-1217-77c1-b598-7ba4cc1ffda6",
+        "model": "gpt-5.3-codex-spark"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
