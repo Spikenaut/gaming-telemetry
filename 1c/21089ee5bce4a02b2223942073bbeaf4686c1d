@@ -1,0 +1,30 @@
+src/session.rs
+  s_bae65205ae4b78::t_9c6800fd5d93a4 11
+  s_bae65205ae4b78::t_8a8127c8e33a8f 65-67,84-107,156-157,159,166-167,178,193
+src/main.rs
+  s_bae65205ae4b78::t_0e62c21ca83914 161-172,517-523
+  s_bae65205ae4b78::t_6147726ae2912a 368
+  s_bae65205ae4b78::t_88ccfcddf29b86 270-272,285
+  s_bae65205ae4b78::t_8a8127c8e33a8f 16,173-186,556
+  s_bae65205ae4b78::t_8af075801a48dd 344
+build.rs
+  s_bae65205ae4b78::t_8a8127c8e33a8f 1-3,5-21
+src/build_info.rs
+  s_bae65205ae4b78::t_8a8127c8e33a8f 12-13,22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "1c21089ee5bce4a02b2223942073bbeaf4686c1d",
+  "prompts": {},
+  "sessions": {
+    "s_bae65205ae4b78": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a023cb-3761-7c01-a06a-8e8f23cab145",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
