@@ -353,9 +353,6 @@ async fn main() -> Result<()> {
     // established identity instead of writing new batches with a conflicting tag.
     session_label = manifest.session_label.clone();
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
-    let mut interval = interval(Duration::from_millis(poll_interval_ms));
-    // After write backpressure, do not burst-catch every missed 5ms tick.
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // Publish only after the fallible resume scan succeeds, so an unreadable
     // existing directory cannot overwrite its prior completed manifest.
     manifest.write_atomic(&output_dir)?;
@@ -380,6 +377,11 @@ async fn main() -> Result<()> {
     }
     println!("Press Ctrl+C to stop gracefully.");
 
+    // Start the schedule only when telemetry polling begins, so startup work
+    // cannot be reported as skipped collection ticks.
+    let mut interval = interval(Duration::from_millis(poll_interval_ms));
+    // After write backpressure, do not burst-catch every missed 5ms tick.
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             tick = interval.tick() => {
