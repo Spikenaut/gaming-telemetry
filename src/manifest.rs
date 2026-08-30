@@ -344,6 +344,10 @@ impl From<&SessionManifest> for PriorRun {
 }
 
 #[cfg(test)]
+#[path = "manifest_failure_tests.rs"]
+mod failure_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::timing::TimingStats;
@@ -372,21 +376,6 @@ mod tests {
             5,
             HostInfo::new(Some("RTX 5080".to_owned()), Some("580.00".to_owned())),
         )
-    }
-
-    fn manifest_temp_files(dir: &Path) -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with(MANIFEST_FILENAME) && name.ends_with(".tmp")
-                    })
-            })
-            .collect()
     }
 
     #[test]
@@ -432,37 +421,6 @@ mod tests {
         assert_eq!(parsed.prior_runs, Vec::new());
         assert_eq!(parsed.workload.class, "gaming");
         assert_eq!(parsed.workload.label, "kcd2");
-    }
-
-    #[test]
-    fn write_atomic_leaves_parseable_json_and_no_temp_file() {
-        let dir = temp_dir("atomic");
-        fixture("s1").write_atomic(&dir).unwrap();
-
-        let path = dir.join(MANIFEST_FILENAME);
-        assert!(path.is_file());
-        assert_eq!(
-            manifest_temp_files(&dir),
-            Vec::<PathBuf>::new(),
-            "temp file must not survive a successful write"
-        );
-        let reloaded = SessionManifest::load(&dir)
-            .expect("manifest should load")
-            .expect("manifest should exist");
-        assert_eq!(reloaded.session_id, "s1");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn write_atomic_removes_temp_file_when_rename_fails() {
-        let dir = temp_dir("rename_failure");
-        std::fs::create_dir(dir.join(MANIFEST_FILENAME)).unwrap();
-
-        assert!(fixture("s1").write_atomic(&dir).is_err());
-        assert_eq!(manifest_temp_files(&dir), Vec::<PathBuf>::new());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
