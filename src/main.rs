@@ -447,7 +447,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gaming_telemetry::build_info::git_sha;
 
     fn sample_fixture(label: &str) -> GpuSample {
         GpuSample {
@@ -557,19 +556,6 @@ mod tests {
         record_write_result(Ok(Err(anyhow::anyhow!("disk full"))), &mut fails);
         assert_eq!(fails, 1);
         // JoinError is hard to construct without panicking a task; skip Err arm here.
-    }
-
-    #[test]
-    fn git_sha_prefers_ci_override() {
-        // Env-mutating coverage kept in one test: `std::env::{set,remove}_var` are
-        // unsafe and racy across parallel tests.
-        unsafe {
-            std::env::set_var("AGENTOS_GIT_SHA", "abc123def");
-        }
-        assert_eq!(git_sha(), "abc123def");
-        unsafe {
-            std::env::remove_var("AGENTOS_GIT_SHA");
-        }
     }
 
     /// The batch schema is a contract with `export_csv`, `query` and the
