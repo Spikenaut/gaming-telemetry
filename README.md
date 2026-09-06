@@ -33,6 +33,25 @@ MangoHud (or any overlay) is **not** recorded. You may still run it yourself for
 - **GPU**: NVIDIA with NVML (RTX 50-series preferred)
 - **Build**: Rust 1.98+ / Cargo
 
+### Cargo features
+
+A default build is just the collector: `poll hardware -> buffer -> Parquet`. The
+optional extras are off because they are expensive, not because they are broken.
+
+| Feature | Default | Adds | Cost |
+|---------|---------|------|------|
+| *(none)* | ✅ | `gaming-telemetry`, `export_csv` | — |
+| `query` | ❌ | the `query` binary | compiles **bundled DuckDB from C++ source**; the dominant build time and peak RAM in this repo |
+| `sentry` | ❌ | crash/error reporting | pulls in an HTTP/TLS stack (`reqwest`, `native-tls`) |
+
+```bash
+cargo build --release                          # collector only (fast)
+cargo build --release --features query,sentry  # everything
+```
+
+Build `query` on a workstation that is also running the game you are measuring
+with a capped job count, e.g. `cargo build --features query -j 8`.
+
 ## Usage
 
 ### 1. Capture a labeled session
@@ -155,8 +174,10 @@ Header:
 
 ### 3. Optional: DuckDB query helper
 
+Behind the `query` feature, since it compiles bundled DuckDB from source:
+
 ```bash
-cargo run --bin query -- "$SESSION_DIR/gpu_telemetry_v2_batch_1.parquet"
+cargo run --features query --bin query -- "$SESSION_DIR/gpu_telemetry_v2_batch_1.parquet"
 ```
 
 ## Replay contract
@@ -184,6 +205,26 @@ For multi-title training mixes, group by Parquet `session_label` (or by folder u
 | Cyberpunk 2077 | `cp2077` |
 
 Max settings only. No install path is required by this repo.
+
+## Optional error reporting
+
+Off unless you build with `--features sentry` **and** set a DSN. With the feature
+compiled out, the collector makes no outbound network calls at all.
+
+| Variable | Purpose |
+|----------|---------|
+| `SENTRY_DSN` | Client ingest DSN. Empty or unset ⇒ reporting stays off. |
+| `SENTRY_ENVIRONMENT` | Environment tag; defaults to `local`. |
+| `SENTRY_RELEASE` | Overrides the release name, otherwise `gaming-telemetry@<git-sha>`. |
+| `AGENTOS_GIT_SHA` | CI override for the build SHA in the manifest and release name. |
+
+Only error and panic messages are sent, with `$HOME` stripped by
+`privacy::redact_personal_path` first. Telemetry samples are never transmitted —
+they only ever go to local Parquet.
+
+> **`SENTRY_DSN`, not `SENTRY_AUTH_TOKEN`.** The release workflow uses
+> `SENTRY_AUTH_TOKEN` for an *org-scoped API token*. That secret must never reach
+> a collector host; the runtime reads only the client DSN.
 
 ## Design notes
 

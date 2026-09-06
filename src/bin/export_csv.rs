@@ -19,15 +19,18 @@ fn main() -> anyhow::Result<()> {
     let output_file = args.get(2).map(|s| s.as_str()).unwrap_or("-");
 
     // Read Parquet
-    let df = LazyFrame::scan_parquet(parquet_file, ScanArgsParquet::default())?
-        .select(&[
-            col("timestamp_ms"),
-            col("temperature_c").alias("gpu_temp_c"),
-            (col("power_usage_mw") / lit(1000.0)).alias("gpu_power_w"),
-            col("cpu_tctl_c"),
-            col("cpu_package_power_w"),
-        ])
-        .collect()?;
+    let df = LazyFrame::scan_parquet(
+        PlRefPath::from(parquet_file.as_str()),
+        ScanArgsParquet::default(),
+    )?
+    .select(&[
+        col("timestamp_ms"),
+        col("temperature_c").alias("gpu_temp_c"),
+        (col("power_usage_mw") / lit(1000.0)).alias("gpu_power_w"),
+        col("cpu_tctl_c"),
+        col("cpu_package_power_w"),
+    ])
+    .collect()?;
 
     // Write CSV
     let mut csv_buffer = Vec::new();

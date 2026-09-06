@@ -9,6 +9,7 @@
 pub mod build_info;
 pub mod cpu;
 pub mod manifest;
+pub mod observability;
 pub mod privacy;
 pub mod session;
 pub mod timing;

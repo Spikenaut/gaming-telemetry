@@ -562,15 +562,17 @@ mod tests {
         // A truncated manifest must not be replaced silently: the existing data
         // could be a real, interrupted session that needs operator recovery.
         std::fs::write(dir.join(MANIFEST_FILENAME), b"{\"schema_vers").unwrap();
-        assert!(SessionManifest::load_or_new(
-            &dir,
-            "new_id2".to_owned(),
-            "re2r".to_owned(),
-            Utc::now(),
-            5,
-            HostInfo::new(None, None),
-        )
-        .is_err());
+        assert!(
+            SessionManifest::load_or_new(
+                &dir,
+                "new_id2".to_owned(),
+                "re2r".to_owned(),
+                Utc::now(),
+                5,
+                HostInfo::new(None, None),
+            )
+            .is_err()
+        );
 
         std::fs::write(
             dir.join(MANIFEST_FILENAME),
