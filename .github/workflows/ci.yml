@@ -32,7 +32,7 @@ jobs:
           toolchain: "1.98.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.3
       - name: clippy
-        # --all-features so the optional `query` and `sentry` code is linted too.
+        # --all-features so the optional `query` code is linted too.
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   check-strict:
@@ -58,7 +58,11 @@ jobs:
           toolchain: "1.98.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.3
       - name: Test
-        run: cargo test --all-features
+        # Both configurations: `--all-features` alone never builds the tests for
+        # the default (no-`query`) build that operators actually run.
+        run: |
+          cargo test
+          cargo test --all-features
         env:
           CARGO_INCREMENTAL: 0
           RUSTFLAGS: "-C instrument-coverage"

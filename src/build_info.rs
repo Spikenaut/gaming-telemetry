@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Build identity shared by Sentry release naming and the session manifest.
+//! Build identity recorded in the session manifest.
 
 /// Collector version, from Cargo.
 pub fn collector_version() -> &'static str {

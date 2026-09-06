@@ -42,11 +42,10 @@ optional extras are off because they are expensive, not because they are broken.
 |---------|---------|------|------|
 | *(none)* | ✅ | `gaming-telemetry`, `export_csv` | — |
 | `query` | ❌ | the `query` binary | compiles **bundled DuckDB from C++ source**; the dominant build time and peak RAM in this repo |
-| `sentry` | ❌ | crash/error reporting | pulls in an HTTP/TLS stack (`reqwest`, `native-tls`) |
 
 ```bash
-cargo build --release                          # collector only (fast)
-cargo build --release --features query,sentry  # everything
+cargo build --release                   # collector only (fast)
+cargo build --release --features query  # plus the DuckDB helper
 ```
 
 Build `query` on a workstation that is also running the game you are measuring
@@ -206,29 +205,11 @@ For multi-title training mixes, group by Parquet `session_label` (or by folder u
 
 Max settings only. No install path is required by this repo.
 
-## Optional error reporting
-
-Off unless you build with `--features sentry` **and** set a DSN. With the feature
-compiled out, the collector makes no outbound network calls at all.
-
-| Variable | Purpose |
-|----------|---------|
-| `SENTRY_DSN` | Client ingest DSN. Empty or unset ⇒ reporting stays off. |
-| `SENTRY_ENVIRONMENT` | Environment tag; defaults to `local`. |
-| `SENTRY_RELEASE` | Overrides the release name, otherwise `gaming-telemetry@<git-sha>`. |
-| `AGENTOS_GIT_SHA` | CI override for the build SHA in the manifest and release name. |
-
-Only error and panic messages are sent, with `$HOME` stripped by
-`privacy::redact_personal_path` first. Telemetry samples are never transmitted —
-they only ever go to local Parquet.
-
-> **`SENTRY_DSN`, not `SENTRY_AUTH_TOKEN`.** The release workflow uses
-> `SENTRY_AUTH_TOKEN` for an *org-scoped API token*. That secret must never reach
-> a collector host; the runtime reads only the client DSN.
-
 ## Design notes
 
 - Collector never walks `$HOME`, Steam libraries, or Proton prefixes.
+- No telemetry, crash reporting, or error data leaves the machine: the collector
+  makes no outbound network calls at all.
 - Path redaction helpers remain for error logs / query display only.
 - The old Cyberpunk **workload verifier** direction (PR #6 and residual skeleton/CI) was removed; see issue #20 / Linear RM-174.
 

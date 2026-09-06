@@ -4,7 +4,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use gaming_telemetry::cpu::CpuMonitor;
 use gaming_telemetry::manifest::{HostInfo, SessionManifest};
-use gaming_telemetry::observability;
 use gaming_telemetry::privacy;
 use gaming_telemetry::session;
 use gaming_telemetry::timing::TimingStats;
@@ -142,12 +141,9 @@ fn spawn_parquet_write(
     batch_id: u32,
     output_dir: PathBuf,
 ) {
-    let scope = observability::current_scope();
     in_flight.spawn(async move {
-        match tokio::task::spawn_blocking(move || {
-            observability::run_in_scope(scope, || write_to_parquet(samples, batch_id, &output_dir))
-        })
-        .await
+        match tokio::task::spawn_blocking(move || write_to_parquet(samples, batch_id, &output_dir))
+            .await
         {
             Ok(result) => result,
             Err(join_err) => Err(anyhow::anyhow!("parquet write task panicked: {}", join_err)),
@@ -155,11 +151,12 @@ fn spawn_parquet_write(
     });
 }
 
-/// Report a failure once, with personal paths stripped before it leaves the process.
+/// Report a failure once, with personal paths stripped.
+///
+/// Session directories and manifests get shared with downstream pipelines, so
+/// `$HOME` is stripped from anything the collector prints.
 fn report_failure(context: &str, detail: &str) {
-    let redacted = privacy::redact_personal_path(detail);
-    eprintln!("{context}: {redacted}");
-    observability::capture_error(&redacted);
+    eprintln!("{context}: {}", privacy::redact_personal_path(detail));
 }
 
 fn record_write_result(res: Result<Result<()>, tokio::task::JoinError>, write_failures: &mut u32) {
@@ -258,8 +255,6 @@ async fn perform_shutdown(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _reporting = observability::init();
-
     let mut session_label = session::resolve_label();
 
     let nvml = Nvml::init()?;
@@ -567,8 +562,7 @@ mod tests {
     #[test]
     fn git_sha_prefers_ci_override() {
         // Env-mutating coverage kept in one test: `std::env::{set,remove}_var` are
-        // unsafe and racy across parallel tests. Sentry release/init coverage now
-        // lives in `gaming_telemetry::observability`.
+        // unsafe and racy across parallel tests.
         unsafe {
             std::env::set_var("AGENTOS_GIT_SHA", "abc123def");
         }

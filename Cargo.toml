@@ -14,13 +14,12 @@ name = "gaming_telemetry"
 path = "src/lib.rs"
 
 # A capture session only needs `poll hardware -> buffer -> Parquet`. Analysis
-# tooling and crash reporting are opt-in so a default build stays small: `duckdb`
-# with `bundled` compiles the whole DuckDB C++ tree, which dominates build time
-# and peak RAM on a workstation that is also running the game being measured.
+# tooling is opt-in so a default build stays small: `duckdb` with `bundled`
+# compiles the whole DuckDB C++ tree, which dominates build time and peak RAM on
+# a workstation that is also running the game being measured.
 [features]
 default = []
 query = ["dep:duckdb"]
-sentry = ["dep:sentry"]
 
 [[bin]]
 name = "query"
@@ -38,5 +37,4 @@ anyhow = "1.0.104"
 # `bundled` builds DuckDB from source; `query.rs` only issues plain SQL through
 # `Connection`/`row.get`, so the crate's Arrow<->Polars bridge is not needed.
 duckdb = { version = "1.10505.0", features = ["bundled"], optional = true }
-sentry = { version = "0.49.2", default-features = false, features = ["backtrace", "panic", "anyhow", "transport", "tokio"], optional = true }
 fs2 = "0.4.3"
