@@ -22,7 +22,8 @@ There is **no** game-install verifier, Steam/Proton discovery, or mod scanner. G
 - Performance state & throttle reasons
 - Fan speed, VRAM used/total
 - Encoder/decoder utilization
-- CPU Tctl / CCD temps and package power (hwmon + RAPL energy delta)
+- CPU Tctl / CCD temps and package power (hwmon + RAPL energy delta) — **nullable**,
+  see [CPU sensor availability](#cpu-sensor-availability)
 - **`session_label`** (string; same for every row in a run)
 
 MangoHud (or any overlay) is **not** recorded. You may still run it yourself for on-screen monitoring; the collector only writes hardware telemetry.
@@ -169,7 +170,38 @@ Header:
 
 `timestamp_ms,gpu_temp_c,gpu_power_w,cpu_tctl_c,cpu_package_power_w`
 
-`gpu_power_w` is `power_usage_mw / 1000.0`.
+`gpu_power_w` is `power_usage_mw / 1000.0`. `cpu_tctl_c` and `cpu_package_power_w`
+are empty when the sensor was unavailable — see below.
+
+## CPU sensor availability
+
+The four CPU columns (`cpu_tctl_c`, `cpu_ccd1_c`, `cpu_ccd2_c`,
+`cpu_package_power_w`) are **nullable**. A null means the sensor could not be
+read; it never means the CPU measured zero.
+
+This matters most for package power. Since
+[CVE-2020-8694](https://nvd.nist.gov/vuln/detail/CVE-2020-8694), RAPL's
+`energy_uj` is typically root-only (`0400`):
+
+```console
+$ ls -l /sys/class/powercap/intel-rapl:0/energy_uj
+-r--------. 1 root root 4096 /sys/class/powercap/intel-rapl:0/energy_uj
+```
+
+Unless the collector can read that file, `cpu_package_power_w` is null for the
+whole session. The collector says so on startup rather than leaving you to find
+out after the capture:
+
+```
+CPU package power unavailable: no readable RAPL energy counter. ...
+```
+
+To record CPU power, run the collector as root, or grant read access to the
+counter for your user.
+
+**Consumers must handle nulls.** Treating a null as `0.0` reintroduces exactly the
+bug this avoids: a model trained on zero-filled CPU power learns that CPU power is
+constant. Drop the rows, mask them, or impute deliberately.
 
 ### 3. Optional: DuckDB query helper
 

@@ -8,6 +8,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **CPU telemetry recorded fabricated zeros.** `CpuMonitor` seeded its energy
+  counter with `unwrap_or(0)` and fell back to the previous reading on every failed
+  read, so when RAPL's `energy_uj` was unreadable — the common case, since it is
+  typically root-only after CVE-2020-8694 — `cpu_package_power_w` differentiated to
+  a stable, plausible `0.0 W` for the entire session, with no error and no log. The
+  temperature readers collapsed "sensor absent" into `0.0 °C` the same way. All four
+  CPU columns are now nullable: a null means "not measured", never "measured zero".
+  The collector reports unavailable sensors on startup.
+
+  **Breaking for consumers:** `cpu_tctl_c`, `cpu_ccd1_c`, `cpu_ccd2_c` and
+  `cpu_package_power_w` can now be null in Parquet and empty in the exported CSV.
+  Treating a null as `0.0` reintroduces the bug.
+- **RAPL counter wraparound was unhandled.** `max_energy_range_uj` is ~65 kJ on a
+  typical desktop, so the counter wraps roughly every 11 minutes at 100 W — many
+  times per capture. Each wrap produced a spurious `0.0 W` sample; the delta is now
+  unwrapped against the ceiling.
+- The first poll no longer reports a power figure differentiated over an arbitrary
+  startup window; a delta needs two samples, so the first is null.
+- RAPL discovery now requires a counter it can actually *read*. It previously
+  accepted any path that merely existed, which selected an unreadable root-only
+  file and froze the counter at its initial value.
+
 - **The build was broken.** The dependency bump to `polars 0.55.2` changed
   `LazyFrame::scan_parquet` to take a `PlRefPath`, made `DataFrame::new` take an
   explicit height, and dropped `IntoIterator` for `&ChunkedArray`. No call site had
