@@ -23,6 +23,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A Parquet write task that **panicked** was counted as a failure but only printed
   to stderr, never reported. It now goes through the same redact-and-report path as
   an I/O error.
+- **Restarting the collector in a populated session directory no longer overwrites
+  `gpu_telemetry_v2_batch_1.parquet`.** Batch numbering resumes from the highest existing
+  batch, parsed numerically rather than lexicographically (`batch_10` sorted before `batch_2`).
+  A restart also continues the existing session — preserving `session_id` and
+  `started_at_utc` while incrementing `restart_count` — instead of starting a new one
+  ([#22](https://github.com/rmems/gaming-telemetry/issues/22))
 
 ### Changed
 
@@ -46,9 +52,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   line, removing the 18 separate passes over the sample slice and the per-row clone
   of the run-invariant `session_label`.
 - Rust edition bumped to 2024 and MSRV to 1.98.0.
-
-### Changed
-
 - **Relicensed from GPL-3.0 to `MIT OR Apache-2.0`**
   ([#19](https://github.com/rmems/gaming-telemetry/issues/19),
   [#23](https://github.com/rmems/gaming-telemetry/pull/23))
@@ -82,15 +85,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   variable, so multi-title capture sessions can be separated downstream
   ([#20](https://github.com/rmems/gaming-telemetry/issues/20),
   [#21](https://github.com/rmems/gaming-telemetry/pull/21))
-
-### Fixed
-
-- **Restarting the collector in a populated session directory no longer overwrites
-  `gpu_telemetry_v2_batch_1.parquet`.** Batch numbering resumes from the highest existing
-  batch, parsed numerically rather than lexicographically (`batch_10` sorted before `batch_2`).
-  A restart also continues the existing session — preserving `session_id` and
-  `started_at_utc` while incrementing `restart_count` — instead of starting a new one
-  ([#22](https://github.com/rmems/gaming-telemetry/issues/22))
 
 ### Removed
 

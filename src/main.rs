@@ -578,17 +578,19 @@ mod tests {
         }
     }
 
-    /// Every column the writer emits must survive a round-trip with its name,
-    /// order and value intact: a silently dropped or transposed column would
-    /// corrupt training data without failing anything.
+    /// The batch schema is a contract with `export_csv`, `query` and the
+    /// downstream SNN pipeline: a dropped or reordered column would corrupt
+    /// training data without failing anything.
     #[test]
-    fn batch_frame_round_trips_every_column() {
+    fn batch_frame_emits_the_canonical_column_set_in_order() {
         let df = build_batch_frame(&[sample_fixture("re4r")]).expect("frame");
+        let names: Vec<&str> = df
+            .get_column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
         assert_eq!(
-            df.get_column_names()
-                .iter()
-                .map(|n| n.as_str())
-                .collect::<Vec<_>>(),
+            names,
             vec![
                 "timestamp_ms",
                 "session_label",
@@ -611,8 +613,14 @@ mod tests {
                 "cpu_package_power_w",
             ]
         );
-        assert_eq!(df.height(), 1);
+    }
+
+    /// One column per width, so a transposition between same-typed fields shows up.
+    #[test]
+    fn batch_frame_preserves_sample_values() {
         let fixture = sample_fixture("re4r");
+        let df = build_batch_frame(std::slice::from_ref(&fixture)).expect("frame");
+        assert_eq!(df.height(), 1);
         assert_eq!(
             df.column("power_usage_mw").unwrap().u32().unwrap().get(0),
             Some(fixture.power_usage_mw)

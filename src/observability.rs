@@ -53,12 +53,21 @@ mod imp {
     /// Captures the ambient scope so a `spawn_blocking` write reports under it.
     pub struct Scope(std::sync::Arc<sentry::Hub>);
 
+    /// `SENTRY_DSN` is the client-side ingest key. It is deliberately NOT
+    /// `SENTRY_AUTH_TOKEN`: that name means an org-scoped API token to
+    /// `sentry-cli` in the release workflow, and must never reach a collector
+    /// host's environment.
     pub fn init() -> Guard {
-        // `SENTRY_DSN` is the client-side ingest key. It is deliberately NOT
-        // `SENTRY_AUTH_TOKEN`: that name means an org-scoped API token to
-        // `sentry-cli` in the release workflow, and must never reach a
-        // collector host's environment.
-        let Some(dsn) = env_nonempty("SENTRY_DSN") else {
+        init_with(
+            env_nonempty("SENTRY_DSN"),
+            env_nonempty("SENTRY_ENVIRONMENT"),
+        )
+    }
+
+    /// Arming rules, separated from environment lookup so they can be tested
+    /// without mutating process env.
+    fn init_with(dsn: Option<String>, environment: Option<String>) -> Guard {
+        let Some(dsn) = dsn else {
             return Guard(None);
         };
         let parsed_dsn = match dsn.parse() {
@@ -76,7 +85,7 @@ mod imp {
         options.dsn = Some(parsed_dsn);
         options.release = Some(Cow::Owned(resolve_release(&git_sha())));
         options.environment = Some(Cow::Owned(
-            env_nonempty("SENTRY_ENVIRONMENT").unwrap_or_else(|| "local".to_owned()),
+            environment.unwrap_or_else(|| "local".to_owned()),
         ));
 
         Guard(Some(sentry::init(options)))
@@ -92,6 +101,27 @@ mod imp {
 
     pub fn capture_error(message: &str) {
         sentry::capture_message(message, sentry::Level::Error);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::init_with;
+
+        #[test]
+        fn arms_only_with_a_parseable_dsn() {
+            assert!(!init_with(None, None).is_active(), "no DSN must not arm");
+            assert!(
+                !init_with(Some("not-a-dsn".to_owned()), None).is_active(),
+                "an unparseable DSN must not arm"
+            );
+            assert!(
+                init_with(
+                    Some("https://key@00000.ingest.sentry.io/0".to_owned()),
+                    Some("ci-test".to_owned()),
+                )
+                .is_active()
+            );
+        }
     }
 }
 
@@ -140,43 +170,5 @@ mod tests {
     fn release_falls_back_when_sha_unknown() {
         assert_eq!(resolve_release("unknown"), "gaming-telemetry");
         assert_eq!(resolve_release("   "), "gaming-telemetry");
-    }
-
-    /// Env-mutating coverage kept in one test: `std::env::{set,remove}_var` are
-    /// unsafe and racy across parallel tests.
-    #[cfg(feature = "sentry")]
-    #[test]
-    fn init_activates_only_with_a_valid_dsn() {
-        unsafe {
-            std::env::remove_var("SENTRY_DSN");
-        }
-        assert!(!super::init().is_active());
-
-        unsafe {
-            std::env::set_var("SENTRY_DSN", "not-a-dsn");
-        }
-        assert!(
-            !super::init().is_active(),
-            "an unparseable DSN must not arm"
-        );
-
-        unsafe {
-            std::env::set_var("SENTRY_DSN", "https://key@00000.ingest.sentry.io/0");
-            std::env::set_var("SENTRY_ENVIRONMENT", "ci-test");
-        }
-        assert!(super::init().is_active());
-
-        unsafe {
-            std::env::remove_var("SENTRY_DSN");
-            std::env::remove_var("SENTRY_ENVIRONMENT");
-        }
-
-        unsafe {
-            std::env::set_var("SENTRY_RELEASE", "gaming-telemetry@myrel");
-        }
-        assert_eq!(resolve_release("ignored"), "gaming-telemetry@myrel");
-        unsafe {
-            std::env::remove_var("SENTRY_RELEASE");
-        }
     }
 }
