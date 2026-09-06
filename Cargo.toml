@@ -2,7 +2,8 @@
 name = "gaming-telemetry"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.98.0"
 
 [workspace]
 
@@ -12,14 +13,28 @@ edition = "2021"
 name = "gaming_telemetry"
 path = "src/lib.rs"
 
+# A capture session only needs `poll hardware -> buffer -> Parquet`. Analysis
+# tooling is opt-in so a default build stays small: `duckdb` with `bundled`
+# compiles the whole DuckDB C++ tree, which dominates build time and peak RAM on
+# a workstation that is also running the game being measured.
+[features]
+default = []
+query = ["dep:duckdb"]
+
+[[bin]]
+name = "query"
+path = "src/bin/query.rs"
+required-features = ["query"]
+
 [dependencies]
-nvml-wrapper = { version = "0.12", features = ["serde"] }
-tokio = { version = "1", features = ["full"] }
-polars = { version = "0.46", features = ["parquet", "lazy"] }
-chrono = { version = "0.4", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-anyhow = "1.0"
-duckdb = { version = "1.1", features = ["polars", "bundled"] }
-sentry = { version = "0.48", default-features = false, features = ["backtrace", "panic", "anyhow", "transport", "tokio"] }
-fs2 = "0.4"
+nvml-wrapper = { version = "0.12.1", features = ["serde"] }
+tokio = { version = "1.53.1", features = ["full"] }
+polars = { version = "0.55.2", features = ["parquet", "lazy"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+anyhow = "1.0.104"
+# `bundled` builds DuckDB from source; `query.rs` only issues plain SQL through
+# `Connection`/`row.get`, so the crate's Arrow<->Polars bridge is not needed.
+duckdb = { version = "1.10505.0", features = ["bundled"], optional = true }
+fs2 = "0.4.3"

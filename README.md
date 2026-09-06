@@ -31,7 +31,25 @@ MangoHud (or any overlay) is **not** recorded. You may still run it yourself for
 
 - **OS**: Linux (developed on Fedora)
 - **GPU**: NVIDIA with NVML (RTX 50-series preferred)
-- **Build**: Rust / Cargo
+- **Build**: Rust 1.98+ / Cargo
+
+### Cargo features
+
+A default build is just the collector: `poll hardware -> buffer -> Parquet`. The
+optional extras are off because they are expensive, not because they are broken.
+
+| Feature | Default | Adds | Cost |
+|---------|---------|------|------|
+| *(none)* | ✅ | `gaming-telemetry`, `export_csv` | — |
+| `query` | ❌ | the `query` binary | compiles **bundled DuckDB from C++ source**; the dominant build time and peak RAM in this repo |
+
+```bash
+cargo build --release                   # collector only (fast)
+cargo build --release --features query  # plus the DuckDB helper
+```
+
+Build `query` on a workstation that is also running the game you are measuring
+with a capped job count, e.g. `cargo build --features query -j 8`.
 
 ## Usage
 
@@ -155,8 +173,10 @@ Header:
 
 ### 3. Optional: DuckDB query helper
 
+Behind the `query` feature, since it compiles bundled DuckDB from source:
+
 ```bash
-cargo run --bin query -- "$SESSION_DIR/gpu_telemetry_v2_batch_1.parquet"
+cargo run --features query --bin query -- "$SESSION_DIR/gpu_telemetry_v2_batch_1.parquet"
 ```
 
 ## Replay contract
@@ -188,6 +208,8 @@ Max settings only. No install path is required by this repo.
 ## Design notes
 
 - Collector never walks `$HOME`, Steam libraries, or Proton prefixes.
+- No telemetry, crash reporting, or error data leaves the machine: the collector
+  makes no outbound network calls at all.
 - Path redaction helpers remain for error logs / query display only.
 - The old Cyberpunk **workload verifier** direction (PR #6 and residual skeleton/CI) was removed; see issue #20 / Linear RM-174.
 

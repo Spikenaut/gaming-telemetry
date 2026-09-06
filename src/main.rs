@@ -2,81 +2,18 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use gaming_telemetry::build_info::git_sha;
 use gaming_telemetry::cpu::CpuMonitor;
 use gaming_telemetry::manifest::{HostInfo, SessionManifest};
 use gaming_telemetry::privacy;
 use gaming_telemetry::session;
 use gaming_telemetry::timing::TimingStats;
-use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use nvml_wrapper::Nvml;
+use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use polars::prelude::*;
-use sentry::ClientInitGuard;
-use std::borrow::Cow;
-use std::fs::{remove_file, rename, File};
+use std::fs::{File, remove_file, rename};
 use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
-use tokio::time::{interval, Duration, MissedTickBehavior};
-
-fn resolve_sentry_release(git_sha: &str) -> String {
-    if let Some(release) = std::env::var("SENTRY_RELEASE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return release;
-    }
-
-    if !git_sha.trim().is_empty() && git_sha != "unknown" {
-        return format!("gaming-telemetry@{git_sha}");
-    }
-
-    if let Some(release) = sentry::release_name!() {
-        let release = release.into_owned();
-        if !release.trim().is_empty() {
-            return release;
-        }
-    }
-
-    // Embed the release SHA (when available via the passed git_sha or prior checks)
-    // before any final fallback. Avoid "@unknown" to prevent mismatch with the
-    // Sentry release workflow which always creates names with the actual SHA
-    // (e.g. gaming-telemetry@<sha> from git rev-parse in CI).
-    "gaming-telemetry".to_owned()
-}
-
-fn init_sentry() -> Option<ClientInitGuard> {
-    let dsn = std::env::var("SENTRY_AUTH_TOKEN")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())?;
-    let git_sha = git_sha();
-    let release = resolve_sentry_release(&git_sha);
-    let environment = std::env::var("SENTRY_ENVIRONMENT")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "local".to_owned());
-    let parsed_dsn = match dsn.parse() {
-        Ok(dsn) => dsn,
-        Err(error) => {
-            eprintln!("Sentry disabled: invalid SENTRY_AUTH_TOKEN ({error})");
-            return None;
-        }
-    };
-
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn: Some(parsed_dsn),
-        release: Some(Cow::Owned(release)),
-        environment: Some(Cow::Owned(environment)),
-        sample_rate: 1.0,
-        traces_sample_rate: 0.0,
-        default_integrations: true,
-        ..Default::default()
-    });
-
-    Some(guard)
-}
+use tokio::time::{Duration, MissedTickBehavior, interval};
 
 #[derive(Debug, Clone)]
 struct GpuSample {
@@ -112,51 +49,49 @@ fn next_batch_id(batch_id: u32) -> Result<u32> {
         .ok_or_else(|| anyhow::anyhow!("batch ID namespace exhausted; start a new SESSION_DIR"))
 }
 
-fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -> Result<()> {
-    let timestamps: Vec<i64> = samples
-        .iter()
-        .map(|s| s.timestamp.timestamp_millis())
-        .collect();
-    let session_labels: Vec<String> = samples.iter().map(|s| s.session_label.clone()).collect();
-    let power: Vec<u32> = samples.iter().map(|s| s.power_usage_mw).collect();
-    let temp: Vec<u32> = samples.iter().map(|s| s.temperature_c).collect();
-    let graphics_clock: Vec<u32> = samples.iter().map(|s| s.graphics_clock_mhz).collect();
-    let memory_clock: Vec<u32> = samples.iter().map(|s| s.memory_clock_mhz).collect();
-    let pcie_rx: Vec<u32> = samples.iter().map(|s| s.pcie_rx_throughput_kbps).collect();
-    let pcie_tx: Vec<u32> = samples.iter().map(|s| s.pcie_tx_throughput_kbps).collect();
-    let pstate: Vec<u32> = samples.iter().map(|s| s.pstate).collect();
-    let throttle: Vec<u64> = samples.iter().map(|s| s.throttle_reasons).collect();
-    let fan: Vec<u32> = samples.iter().map(|s| s.fan_speed_perc).collect();
-    let mem_used: Vec<u64> = samples.iter().map(|s| s.memory_used_mb).collect();
-    let mem_total: Vec<u64> = samples.iter().map(|s| s.memory_total_mb).collect();
-    let enc_util: Vec<u32> = samples.iter().map(|s| s.encoder_util_perc).collect();
-    let dec_util: Vec<u32> = samples.iter().map(|s| s.decoder_util_perc).collect();
-    let cpu_tctl: Vec<f32> = samples.iter().map(|s| s.cpu_tctl_c).collect();
-    let cpu_ccd1: Vec<f32> = samples.iter().map(|s| s.cpu_ccd1_c).collect();
-    let cpu_ccd2: Vec<f32> = samples.iter().map(|s| s.cpu_ccd2_c).collect();
-    let cpu_power: Vec<f32> = samples.iter().map(|s| s.cpu_package_power_w).collect();
+/// Build the batch columns from one `"name": type = accessor` row per column.
+///
+/// Keeping the three together means a new or reordered `GpuSample` field cannot
+/// silently transpose two columns that happen to share a type — the failure mode
+/// of a long `df!` whose value list sits far from its column names.
+macro_rules! batch_columns {
+    ($samples:expr, $($name:literal: $ty:ty = $value:expr),+ $(,)?) => {
+        vec![$(
+            Column::new($name.into(), $samples.iter().map($value).collect::<Vec<$ty>>())
+        ),+]
+    };
+}
 
-    let mut df = df!(
-        "timestamp_ms" => timestamps,
-        "session_label" => session_labels,
-        "power_usage_mw" => power,
-        "temperature_c" => temp,
-        "graphics_clock_mhz" => graphics_clock,
-        "memory_clock_mhz" => memory_clock,
-        "pcie_rx_kbps" => pcie_rx,
-        "pcie_tx_kbps" => pcie_tx,
-        "pstate" => pstate,
-        "throttle_reasons_bitmask" => throttle,
-        "fan_speed_perc" => fan,
-        "memory_used_mb" => mem_used,
-        "memory_total_mb" => mem_total,
-        "encoder_util_perc" => enc_util,
-        "decoder_util_perc" => dec_util,
-        "cpu_tctl_c" => cpu_tctl,
-        "cpu_ccd1_c" => cpu_ccd1,
-        "cpu_ccd2_c" => cpu_ccd2,
-        "cpu_package_power_w" => cpu_power,
-    )?;
+/// Pack samples into the canonical batch schema.
+///
+/// `session_label` is borrowed, not cloned per row: it is invariant for a run.
+fn build_batch_frame(samples: &[GpuSample]) -> Result<DataFrame> {
+    let columns = batch_columns!(samples,
+        "timestamp_ms": i64 = |s| s.timestamp.timestamp_millis(),
+        "session_label": &str = |s| s.session_label.as_str(),
+        "power_usage_mw": u32 = |s| s.power_usage_mw,
+        "temperature_c": u32 = |s| s.temperature_c,
+        "graphics_clock_mhz": u32 = |s| s.graphics_clock_mhz,
+        "memory_clock_mhz": u32 = |s| s.memory_clock_mhz,
+        "pcie_rx_kbps": u32 = |s| s.pcie_rx_throughput_kbps,
+        "pcie_tx_kbps": u32 = |s| s.pcie_tx_throughput_kbps,
+        "pstate": u32 = |s| s.pstate,
+        "throttle_reasons_bitmask": u64 = |s| s.throttle_reasons,
+        "fan_speed_perc": u32 = |s| s.fan_speed_perc,
+        "memory_used_mb": u64 = |s| s.memory_used_mb,
+        "memory_total_mb": u64 = |s| s.memory_total_mb,
+        "encoder_util_perc": u32 = |s| s.encoder_util_perc,
+        "decoder_util_perc": u32 = |s| s.decoder_util_perc,
+        "cpu_tctl_c": f32 = |s| s.cpu_tctl_c,
+        "cpu_ccd1_c": f32 = |s| s.cpu_ccd1_c,
+        "cpu_ccd2_c": f32 = |s| s.cpu_ccd2_c,
+        "cpu_package_power_w": f32 = |s| s.cpu_package_power_w,
+    );
+    Ok(DataFrame::new(samples.len(), columns)?)
+}
+
+fn write_to_parquet(samples: Vec<GpuSample>, batch_id: u32, output_dir: &Path) -> Result<()> {
+    let mut df = build_batch_frame(&samples)?;
 
     let filename = output_dir.join(format!(
         "{}{}{}",
@@ -206,12 +141,9 @@ fn spawn_parquet_write(
     batch_id: u32,
     output_dir: PathBuf,
 ) {
-    let hub = sentry::Hub::current();
     in_flight.spawn(async move {
-        match tokio::task::spawn_blocking(move || {
-            sentry::Hub::run(hub, || write_to_parquet(samples, batch_id, &output_dir))
-        })
-        .await
+        match tokio::task::spawn_blocking(move || write_to_parquet(samples, batch_id, &output_dir))
+            .await
         {
             Ok(result) => result,
             Err(join_err) => Err(anyhow::anyhow!("parquet write task panicked: {}", join_err)),
@@ -219,18 +151,26 @@ fn spawn_parquet_write(
     });
 }
 
+/// Report a failure once, with personal paths stripped.
+///
+/// Session directories and manifests get shared with downstream pipelines, so
+/// `$HOME` is stripped from anything the collector prints.
+fn report_failure(context: &str, detail: &str) {
+    eprintln!("{context}: {}", privacy::redact_personal_path(detail));
+}
+
 fn record_write_result(res: Result<Result<()>, tokio::task::JoinError>, write_failures: &mut u32) {
     match res {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             *write_failures += 1;
-            let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-            eprintln!("Failed to write to Parquet: {}", redacted);
-            sentry::capture_message(&redacted, sentry::Level::Error);
+            report_failure("Failed to write to Parquet", &format!("{:?}", e));
         }
         Err(e) => {
+            // A panicked write loses a batch just as an I/O error does; it must be
+            // reported through the same path, not only to stderr.
             *write_failures += 1;
-            eprintln!("In-flight parquet write task failed: {}", e);
+            report_failure("In-flight parquet write task failed", &e.to_string());
         }
     }
 }
@@ -278,12 +218,20 @@ async fn perform_shutdown(
     // drain can take much longer and must not inflate the capture's end time.
     let capture_ended_at_utc = Utc::now();
     if !buffer.is_empty() {
-        let new_batch_id = next_batch_id(batch_counter)?;
-        if let Err(e) = write_to_parquet(buffer, new_batch_id, output_dir) {
-            *write_failures += 1;
-            let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-            eprintln!("Failed to write final batch: {}", redacted);
-            sentry::capture_message(&redacted, sentry::Level::Error);
+        // Losing the tail batch is a write failure, not a reason to skip the drain
+        // and manifest finalize below: an unclean run still deserves an accurate
+        // record of what it captured.
+        match next_batch_id(batch_counter) {
+            Ok(new_batch_id) => {
+                if let Err(e) = write_to_parquet(buffer, new_batch_id, output_dir) {
+                    *write_failures += 1;
+                    report_failure("Failed to write final batch", &format!("{:?}", e));
+                }
+            }
+            Err(e) => {
+                *write_failures += 1;
+                report_failure("Cannot number the final batch", &format!("{:?}", e));
+            }
         }
     }
     drain_in_flight(in_flight, write_failures).await;
@@ -292,9 +240,7 @@ async fn perform_shutdown(
     // an accurate manifest describing what it acquired and what failed to persist.
     manifest.finalize(capture_ended_at_utc, timing.summary(), *write_failures);
     if let Err(e) = manifest.write_atomic(output_dir) {
-        let redacted = privacy::redact_personal_path(&format!("{:?}", e));
-        eprintln!("Failed to finalize session manifest: {}", redacted);
-        sentry::capture_message(&redacted, sentry::Level::Error);
+        report_failure("Failed to finalize session manifest", &format!("{:?}", e));
         // A missing on-disk finalize (`ended_at_utc: null`) is an unclean exit;
         // do not report graceful success or a zero exit status.
         return Err(e);
@@ -309,8 +255,6 @@ async fn perform_shutdown(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _sentry_guard = init_sentry();
-
     let mut session_label = session::resolve_label();
 
     let nvml = Nvml::init()?;
@@ -452,7 +396,27 @@ async fn main() -> Result<()> {
                     }
                     let samples_to_write =
                         std::mem::replace(&mut buffer, Vec::with_capacity(BUFFER_SIZE));
-                    batch_counter = next_batch_id(batch_counter)?;
+                    let next_id = match next_batch_id(batch_counter) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            // Returning here would drop the JoinSet, aborting writes
+                            // still in flight. Converge on the same shutdown path
+                            // Ctrl+C uses so nothing already captured is lost.
+                            report_failure("Cannot start a new batch", &format!("{:?}", e));
+                            perform_shutdown(
+                                samples_to_write,
+                                batch_counter,
+                                &output_dir,
+                                &mut in_flight,
+                                &mut write_failures,
+                                &mut manifest,
+                                &timing,
+                            )
+                            .await?;
+                            break;
+                        }
+                    };
+                    batch_counter = next_id;
                     spawn_parquet_write(
                         &mut in_flight,
                         samples_to_write,
@@ -546,14 +510,17 @@ mod tests {
         );
 
         // Verify the session_label column is written for every row.
-        let df = LazyFrame::scan_parquet(&path, ScanArgsParquet::default())
-            .unwrap()
-            .select(&[col("session_label")])
-            .collect()
-            .unwrap();
+        let df = LazyFrame::scan_parquet(
+            PlRefPath::try_from_path(&path).unwrap(),
+            ScanArgsParquet::default(),
+        )
+        .unwrap()
+        .select(&[col("session_label")])
+        .collect()
+        .unwrap();
         let labels = df.column("session_label").unwrap().str().unwrap();
         assert_eq!(labels.len(), 2);
-        assert!(labels.into_iter().all(|opt| opt == Some("kcd2")));
+        assert!(labels.iter().all(|opt| opt == Some("kcd2")));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -591,58 +558,74 @@ mod tests {
         // JoinError is hard to construct without panicking a task; skip Err arm here.
     }
 
+    /// The batch schema is a contract with `export_csv`, `query` and the
+    /// downstream SNN pipeline: a dropped or reordered column would corrupt
+    /// training data without failing anything.
     #[test]
-    fn test_sentry_helpers_env_resolution_and_init() {
-        // All env-mutating coverage for git_sha/resolve/init in one test to avoid
-        // parallel test races on process env (std::env::{set,remove}_var are unsafe
-        // and racy). This single test exercises the branches (including the "good sha"
-        // fast-path) that give codecov for the Sentry integration (#17).
-        unsafe {
-            std::env::set_var("AGENTOS_GIT_SHA", "abc123def");
-        }
-        assert_eq!(git_sha(), "abc123def");
-        unsafe {
-            std::env::remove_var("AGENTOS_GIT_SHA");
-        }
-
-        unsafe {
-            std::env::set_var("SENTRY_RELEASE", "gaming-telemetry@myrel");
-        }
-        assert_eq!(resolve_sentry_release("ignored"), "gaming-telemetry@myrel");
-        unsafe {
-            std::env::remove_var("SENTRY_RELEASE");
-        }
-
-        // Cover the explicit-sha fast path (no SENTRY_RELEASE) sequentially.
-        unsafe {
-            std::env::remove_var("SENTRY_RELEASE");
-        }
+    fn batch_frame_emits_the_canonical_column_set_in_order() {
+        let df = build_batch_frame(&[sample_fixture("re4r")]).expect("frame");
+        let names: Vec<&str> = df
+            .get_column_names()
+            .iter()
+            .map(|name| name.as_str())
+            .collect();
         assert_eq!(
-            resolve_sentry_release("feedface"),
-            "gaming-telemetry@feedface"
+            names,
+            vec![
+                "timestamp_ms",
+                "session_label",
+                "power_usage_mw",
+                "temperature_c",
+                "graphics_clock_mhz",
+                "memory_clock_mhz",
+                "pcie_rx_kbps",
+                "pcie_tx_kbps",
+                "pstate",
+                "throttle_reasons_bitmask",
+                "fan_speed_perc",
+                "memory_used_mb",
+                "memory_total_mb",
+                "encoder_util_perc",
+                "decoder_util_perc",
+                "cpu_tctl_c",
+                "cpu_ccd1_c",
+                "cpu_ccd2_c",
+                "cpu_package_power_w",
+            ]
         );
+    }
 
-        unsafe {
-            std::env::remove_var("SENTRY_RELEASE");
-        }
-        let r = resolve_sentry_release("unknown");
-        assert!(r.starts_with("gaming-telemetry"));
+    /// One column per width, so a transposition between same-typed fields shows up.
+    #[test]
+    fn batch_frame_preserves_sample_values() {
+        let fixture = sample_fixture("re4r");
+        let df = build_batch_frame(std::slice::from_ref(&fixture)).expect("frame");
+        assert_eq!(df.height(), 1);
+        assert_eq!(
+            df.column("power_usage_mw").unwrap().u32().unwrap().get(0),
+            Some(fixture.power_usage_mw)
+        );
+        assert_eq!(
+            df.column("memory_used_mb").unwrap().u64().unwrap().get(0),
+            Some(fixture.memory_used_mb)
+        );
+        assert_eq!(
+            df.column("cpu_package_power_w")
+                .unwrap()
+                .f32()
+                .unwrap()
+                .get(0),
+            Some(fixture.cpu_package_power_w)
+        );
+        assert_eq!(
+            df.column("session_label").unwrap().str().unwrap().get(0),
+            Some("re4r")
+        );
+    }
 
-        unsafe {
-            std::env::remove_var("SENTRY_AUTH_TOKEN");
-        }
-        let guard = init_sentry();
-        assert!(guard.is_none());
-
-        unsafe {
-            std::env::set_var("SENTRY_AUTH_TOKEN", "https://key@00000.ingest.sentry.io/0");
-            std::env::set_var("SENTRY_ENVIRONMENT", "ci-test");
-        }
-        let guard = init_sentry();
-        assert!(guard.is_some());
-        unsafe {
-            std::env::remove_var("SENTRY_AUTH_TOKEN");
-            std::env::remove_var("SENTRY_ENVIRONMENT");
-        }
+    #[test]
+    fn next_batch_id_rejects_exhausted_namespace() {
+        assert_eq!(next_batch_id(5).unwrap(), 6);
+        assert!(next_batch_id(u32::MAX).is_err());
     }
 }

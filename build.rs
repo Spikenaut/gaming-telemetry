@@ -4,14 +4,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AGENTOS_GIT_SHA");
     if let Ok(head_path) = git_path("HEAD") {
         println!("cargo:rerun-if-changed={head_path}");
-        if let Ok(head) = std::fs::read_to_string(&head_path) {
-            if let Some(reference) = head.strip_prefix("ref: ").map(str::trim) {
-                if let Ok(reference_path) = git_path(reference) {
-                    println!("cargo:rerun-if-changed={reference_path}");
-                }
-                if let Ok(packed_refs) = git_path("packed-refs") {
-                    println!("cargo:rerun-if-changed={packed_refs}");
-                }
+        if let Ok(head) = std::fs::read_to_string(&head_path)
+            && let Some(reference) = head.strip_prefix("ref: ").map(str::trim)
+        {
+            if let Ok(reference_path) = git_path(reference) {
+                println!("cargo:rerun-if-changed={reference_path}");
+            }
+            // Only declare packed-refs when it exists: Cargo re-runs the build
+            // script unconditionally for a listed path that is missing.
+            if let Ok(packed_refs) = git_path("packed-refs")
+                && std::path::Path::new(&packed_refs).exists()
+            {
+                println!("cargo:rerun-if-changed={packed_refs}");
             }
         }
     }
