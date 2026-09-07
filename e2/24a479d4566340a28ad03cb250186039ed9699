@@ -1,0 +1,19 @@
+src/cpu.rs
+  s_2a6b8586fd03bd::t_c858ed41784bdc 217-243,246,259,294,325-340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "e224a479d4566340a28ad03cb250186039ed9699",
+  "prompts": {},
+  "sessions": {
+    "s_2a6b8586fd03bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "165490d3-edfc-485b-bac0-2e2f114b578c",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
