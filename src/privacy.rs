@@ -43,24 +43,33 @@ fn redact_user_components(text: &str, user: &str) -> String {
         .join("/")
 }
 
-/// The operator's login name, for stripping it out of path components.
+/// Every identity worth stripping, not just the first one found.
 ///
-/// Falls back to the last component of `$HOME`, so a process started without
-/// `USER`/`LOGNAME` still redacts.
-fn current_user() -> Option<String> {
+/// `USER` and the home directory's own name can name *different* accounts. Under
+/// `sudo`, `USER` becomes `root` — which this module deliberately never redacts,
+/// since it identifies nobody — while `HOME` still carries the operator's name.
+/// Returning only the first match would leave the other visible on external
+/// media, exactly where `$HOME` prefix redaction cannot help because the path
+/// never goes through the home directory.
+fn current_user_identities() -> Vec<String> {
+    let mut identities: Vec<String> = Vec::new();
+    let mut push = |identities: &mut Vec<String>, value: String| {
+        if !value.is_empty() && !identities.contains(&value) {
+            identities.push(value);
+        }
+    };
+
     for key in ["USER", "LOGNAME"] {
         if let Some(value) = env::var_os(key) {
-            let value = value.to_string_lossy().trim().to_owned();
-            if !value.is_empty() {
-                return Some(value);
-            }
+            push(&mut identities, value.to_string_lossy().trim().to_owned());
         }
     }
-    let home = env::var_os("HOME")?;
-    Path::new(&home)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
+    if let Some(home) = env::var_os("HOME")
+        && let Some(name) = Path::new(&home).file_name()
+    {
+        push(&mut identities, name.to_string_lossy().into_owned());
+    }
+    identities
 }
 
 /// Redact embedded occurrences of the user's `$HOME`.
@@ -82,11 +91,11 @@ pub fn redact_home(text: &str) -> String {
 /// — systemd services and containers routinely are — would otherwise redact
 /// nothing at all.
 pub fn redact_personal_path(path: &str) -> String {
-    let redacted = redact_home(path);
-    match current_user() {
-        Some(user) => redact_user_components(&redacted, &user),
-        None => redacted,
+    let mut redacted = redact_home(path);
+    for user in current_user_identities() {
+        redacted = redact_user_components(&redacted, &user);
     }
+    redacted
 }
 
 #[cfg(test)]
@@ -165,5 +174,24 @@ mod tests {
             "/home/$USER"
         );
         assert_eq!(redact_user_components("alice", "alice"), "$USER");
+    }
+
+    /// The `sudo` shape: `USER` names an account this module refuses to redact,
+    /// while `HOME` still carries the operator's name. Redacting only the first
+    /// identity found would leave the operator visible on external media, where
+    /// `$HOME` prefix redaction never matches.
+    #[test]
+    fn every_identity_is_stripped_not_just_the_first() {
+        let path = "/run/media/raulmc/backup/neuromorphic_data/kcd2";
+
+        // `root` is skipped by design, so the second identity must still apply.
+        assert_eq!(
+            redact_user_components(&redact_user_components(path, "root"), "raulmc"),
+            "/run/media/$USER/backup/neuromorphic_data/kcd2"
+        );
+
+        // Applying the same identity twice is a no-op, so ordering cannot corrupt.
+        let once = redact_user_components(path, "raulmc");
+        assert_eq!(redact_user_components(&once, "raulmc"), once);
     }
 }
