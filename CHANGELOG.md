@@ -68,6 +68,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`export_csv` now carries `session_label`, and exports a whole session.**
+  The canonical CSV is the documented bridge to `corinth-canal`, but it dropped
+  the one column that separates titles — so the multi-game capture added in
+  [#20](https://github.com/rmems/gaming-telemetry/issues/20) was unusable through
+  the documented path. The label is appended **last**, keeping the original five
+  columns positionally stable.
+
+  The binary now accepts a session directory and emits every batch in batch order
+  under one header. It previously took a single file, so exporting a session meant
+  N invocations producing N headers, and any shell glob ordered `batch_10` before
+  `batch_2` — silently scrambling the exported time series.
+
+  The column contract and batch ordering moved into `gaming_telemetry::export`,
+  which has tests; `bin/export_csv.rs` was previously all `main()` with no seam and
+  no coverage at all.
+
 - **`duckdb` is now optional**, behind an off-by-default `query` cargo feature
   ([#20](https://github.com/rmems/gaming-telemetry/issues/20)). Its `bundled` feature
   compiles the whole DuckDB C++ tree and dominated build time and peak RAM on a
