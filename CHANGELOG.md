@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Path redaction no longer fails open without `HOME`, and covers external
+  media.** `redact_home` returned text unchanged when `HOME` was unset — routine
+  for a systemd unit or a container — so a home-like path reached logs and error
+  reports unredacted. It also only stripped the literal `$HOME` prefix, so a
+  `SESSION_DIR` on external media (`/run/media/<user>/…`, `/media/<user>/…`)
+  carried the operator's username verbatim without ever passing through the home
+  directory. `redact_personal_path` now also replaces whole path *components*
+  equal to the login name with `$USER`, resolved from `USER`/`LOGNAME` or the last
+  component of `$HOME`. Component-wise, so a word that merely contains the name
+  (`alice` inside `/opt/alicent`) is untouched; `root` and names under three
+  characters are skipped as ambiguous.
+
 - **The build was broken.** The dependency bump to `polars 0.55.2` changed
   `LazyFrame::scan_parquet` to take a `PlRefPath`, made `DataFrame::new` take an
   explicit height, and dropped `IntoIterator` for `&ChunkedArray`. No call site had
