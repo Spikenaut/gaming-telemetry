@@ -1,0 +1,31 @@
+src/manifest.rs
+  s_61d9af33efccd3::t_8ba28690082717 168-169,171-198,201,208,212-214,225-236
+src/main.rs
+  s_15cb34ac95a660::t_2954030cbde72d 273-288
+CHANGELOG.md
+  ai_agent 16-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "5e37d11cc064bb952dcc8e2c081d2417dab28e65",
+  "prompts": {},
+  "sessions": {
+    "s_15cb34ac95a660": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "41da07af-81bc-4d6b-ab47-03566b02a40e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    },
+    "s_61d9af33efccd3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c245a3ef-3cb2-4d94-af8b-0afd548a0d67",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
