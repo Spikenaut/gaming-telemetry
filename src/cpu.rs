@@ -28,7 +28,19 @@ pub struct CpuMonitor {
     rapl_max_range_uj: Option<u64>,
     /// `None` until the first successful read — a delta needs two samples.
     last_energy: Option<(u64, Instant)>,
+    /// Consecutive ticks where the energy counter did not move.
+    zero_delta_ticks: u32,
+    stuck_reported: bool,
 }
+
+/// Consecutive zero-energy deltas before a stuck counter is reported.
+///
+/// At a 5 ms poll a genuine zero delta is not physically meaningful: even an idle
+/// package accumulates tens of thousands of microjoules per tick, far above RAPL
+/// counter resolution. A run of them means the counter is not advancing, and a
+/// readable-but-frozen counter would otherwise differentiate to a plausible 0 W —
+/// the very failure this module exists to prevent.
+const STUCK_COUNTER_TICKS: u32 = 200;
 
 impl Default for CpuMonitor {
     fn default() -> Self {
@@ -46,11 +58,27 @@ impl CpuMonitor {
         let k10temp_base_path = Self::discover_k10temp_path();
         let rapl_path = Self::discover_rapl_path();
 
-        if k10temp_base_path.is_none() {
-            eprintln!(
+        match k10temp_base_path.as_deref() {
+            None => eprintln!(
                 "CPU temperature unavailable: no k10temp hwmon device found. \
                  Temperature columns will be empty."
-            );
+            ),
+            Some(base) => {
+                // Probe each input: CCD sensors do not exist on every k10temp SKU,
+                // and a single unreadable input would otherwise leave one column
+                // empty for the whole session with no notice.
+                let missing: Vec<&str> = TEMP_INPUTS
+                    .iter()
+                    .filter(|(input, _)| read_i64_file(&base.join(input)).is_none())
+                    .map(|(_, column)| *column)
+                    .collect();
+                if !missing.is_empty() {
+                    eprintln!(
+                        "CPU temperature sensors unavailable: {}. Those columns will be empty.",
+                        missing.join(", ")
+                    );
+                }
+            }
         }
         if rapl_path.is_none() {
             eprintln!(
@@ -62,12 +90,21 @@ impl CpuMonitor {
         }
 
         let rapl_max_range_uj = rapl_path.as_deref().and_then(Self::read_max_energy_range);
+        if rapl_path.is_some() && rapl_max_range_uj.is_none() {
+            eprintln!(
+                "CPU package power: `max_energy_range_uj` is unreadable, so counter \
+                 wraparound cannot be resolved. Power will be empty for every tick \
+                 after the counter first wraps (roughly every 11 minutes at 100 W)."
+            );
+        }
 
         Self {
             k10temp_base_path,
             rapl_path,
             rapl_max_range_uj,
             last_energy: None,
+            zero_delta_ticks: 0,
+            stuck_reported: false,
         }
     }
 
@@ -79,23 +116,29 @@ impl CpuMonitor {
             rapl_path: None,
             rapl_max_range_uj: None,
             last_energy: None,
+            zero_delta_ticks: 0,
+            stuck_reported: false,
         }
     }
 
     /// Read every CPU sensor for this tick.
     pub fn poll(&mut self) -> CpuSample {
         CpuSample {
-            tctl_c: self.read_temp("temp1_input"),
-            ccd1_c: self.read_temp("temp3_input"),
-            ccd2_c: self.read_temp("temp4_input"),
+            tctl_c: self.read_temp(TEMP_INPUTS[0].0),
+            ccd1_c: self.read_temp(TEMP_INPUTS[1].0),
+            ccd2_c: self.read_temp(TEMP_INPUTS[2].0),
             package_power_w: self.read_power(),
         }
     }
 
     /// Read one hwmon temperature input, in degrees Celsius.
+    ///
+    /// hwmon reports `temp*_input` as *signed* millidegrees, so this must not parse
+    /// as unsigned: a legitimate sub-zero reading would fail to parse and be
+    /// recorded as "sensor unavailable".
     fn read_temp(&self, input: &str) -> Option<f32> {
         let base = self.k10temp_base_path.as_ref()?;
-        read_u64_file(&base.join(input)).map(|milli| milli as f32 / 1000.0)
+        read_i64_file(&base.join(input)).map(|milli| milli as f32 / 1000.0)
     }
 
     /// Differentiate the energy counter into watts since the previous tick.
@@ -105,9 +148,25 @@ impl CpuMonitor {
         let now = Instant::now();
 
         // Replace the stored reading whether or not a delta can be produced, so a
-        // transient read failure costs one sample instead of inflating the next.
+        // failed power computation (a wrap with no usable ceiling) costs one sample
+        // instead of stretching the next delta across two ticks. A failed *read*
+        // never reaches here — `read_u64_file` above returns first.
         let previous = self.last_energy.replace((current_uj, now));
         let (previous_uj, previous_at) = previous?;
+
+        if current_uj == previous_uj {
+            self.zero_delta_ticks = self.zero_delta_ticks.saturating_add(1);
+            if self.zero_delta_ticks >= STUCK_COUNTER_TICKS && !self.stuck_reported {
+                self.stuck_reported = true;
+                eprintln!(
+                    "CPU package power counter has not advanced in {STUCK_COUNTER_TICKS} \
+                     consecutive reads. It is readable but frozen, so recorded power is \
+                     not trustworthy for this session."
+                );
+            }
+        } else {
+            self.zero_delta_ticks = 0;
+        }
 
         power_watts(
             previous_uj,
@@ -133,20 +192,19 @@ impl CpuMonitor {
 
     /// Discover a RAPL energy counter this process can actually read.
     fn discover_rapl_path() -> Option<PathBuf> {
-        const CANDIDATES: [&str; 3] = [
-            "/sys/class/powercap/amd-energy:0/energy_uj",
-            "/sys/class/powercap/intel-rapl:0/energy_uj",
-            "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
-        ];
+        Self::first_readable(RAPL_CANDIDATES.iter().map(Path::new))
+    }
 
-        // `Path::exists` is not enough. `energy_uj` is commonly present but
-        // root-only, and selecting a path we cannot read yields a counter frozen
-        // at its initial value — which differentiates to a plausible, constant 0 W.
-        CANDIDATES
-            .iter()
-            .map(Path::new)
-            .find(|path| read_u64_file(path).is_some())
+    /// Pick the first candidate whose contents can actually be read.
+    ///
+    /// `Path::exists` is not enough: `energy_uj` is commonly present but root-only,
+    /// and selecting a path we cannot read yields a counter frozen at its initial
+    /// value — which differentiates to a plausible, constant 0 W.
+    fn first_readable<'a>(candidates: impl Iterator<Item = &'a Path>) -> Option<PathBuf> {
+        candidates
+            .filter(|path| read_u64_file(path).is_some())
             .map(Path::to_path_buf)
+            .next()
     }
 
     /// Read the counter ceiling that sits beside an `energy_uj` file.
@@ -188,6 +246,27 @@ fn power_watts(
 
     let watts = (delta_uj as f64 / 1_000_000.0) / elapsed_sec;
     watts.is_finite().then_some(watts as f32)
+}
+
+/// hwmon input filename paired with the Parquet column it feeds.
+const TEMP_INPUTS: [(&str, &str); 3] = [
+    ("temp1_input", "cpu_tctl_c"),
+    ("temp3_input", "cpu_ccd1_c"),
+    ("temp4_input", "cpu_ccd2_c"),
+];
+
+/// Energy counters, most specific first.
+const RAPL_CANDIDATES: [&str; 3] = [
+    "/sys/class/powercap/amd-energy:0/energy_uj",
+    "/sys/class/powercap/intel-rapl:0/energy_uj",
+    "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
+];
+
+/// Read a file holding a single signed integer (hwmon temperatures).
+fn read_i64_file(path: &Path) -> Option<i64> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.trim().parse::<i64>().ok())
 }
 
 /// Read a file holding a single unsigned integer.
@@ -240,6 +319,62 @@ mod tests {
         assert_eq!(power_watts(0, 1_000_000, Some(MAX_RANGE), 0.0), None);
         assert_eq!(power_watts(0, 1_000_000, Some(MAX_RANGE), -1.0), None);
         assert_eq!(power_watts(0, 1_000_000, Some(MAX_RANGE), f64::NAN), None);
+    }
+
+    fn fixture_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-fixtures")
+            .join(format!("cpu_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// hwmon reports signed millidegrees; a sub-zero reading is a real value, not
+    /// an unavailable sensor.
+    #[test]
+    fn negative_temperatures_parse_instead_of_reading_as_unavailable() {
+        let dir = fixture_dir("signed_temp");
+        let path = dir.join("temp1_input");
+        std::fs::write(&path, "-5000\n").unwrap();
+        assert_eq!(super::read_i64_file(&path), Some(-5000));
+        assert_eq!(super::read_u64_file(&path), None, "u64 rejects the sign");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The core claim of the RAPL fix: prefer a counter that can be *read*, not
+    /// merely one that exists.
+    #[test]
+    fn discovery_skips_an_unreadable_candidate_for_a_readable_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = fixture_dir("readable");
+        let unreadable = dir.join("energy_uj_denied");
+        let readable = dir.join("energy_uj_ok");
+        std::fs::write(&unreadable, "111\n").unwrap();
+        std::fs::write(&readable, "222\n").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Running as root would defeat the point: 0o000 stays readable there.
+        if super::read_u64_file(&unreadable).is_none() {
+            let picked =
+                CpuMonitor::first_readable([unreadable.as_path(), readable.as_path()].into_iter());
+            assert_eq!(picked.as_deref(), Some(readable.as_path()));
+        }
+
+        let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_returns_none_when_no_candidate_is_readable() {
+        let dir = fixture_dir("none_readable");
+        let missing = dir.join("absent_energy_uj");
+        assert_eq!(
+            CpuMonitor::first_readable([missing.as_path()].into_iter()),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A missing sensor must never be reported as a plausible zero.

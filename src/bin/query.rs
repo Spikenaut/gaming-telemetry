@@ -63,12 +63,12 @@ fn main() -> Result<()> {
         let avg_enc: f64 = row.get(5)?;
         let avg_dec: f64 = row.get(6)?;
         let count: i64 = row.get(7)?;
-        let avg_cpu_temp: f64 = row.get(8)?;
-        let max_cpu_temp: f64 = row.get(9)?;
-        let avg_cpu_ccd1: f64 = row.get(10)?;
-        let max_cpu_ccd1: f64 = row.get(11)?;
-        let avg_cpu_ccd2: f64 = row.get(12)?;
-        let max_cpu_ccd2: f64 = row.get(13)?;
+        let avg_cpu_temp: Option<f64> = row.get(8)?;
+        let max_cpu_temp: Option<f64> = row.get(9)?;
+        let avg_cpu_ccd1: Option<f64> = row.get(10)?;
+        let max_cpu_ccd1: Option<f64> = row.get(11)?;
+        let avg_cpu_ccd2: Option<f64> = row.get(12)?;
+        let max_cpu_ccd2: Option<f64> = row.get(13)?;
 
         println!("Samples: {}", count);
         println!("Avg Power: {:.2} W", avg_power / 1000.0);
@@ -79,12 +79,22 @@ fn main() -> Result<()> {
         println!("Avg Encoder: {:.1}%", avg_enc);
         println!("Avg Decoder: {:.1}%", avg_dec);
         println!("\n--- CPU Telemetry ---");
-        println!("Avg CPU Temp (Tctl): {:.1} C", avg_cpu_temp);
-        println!("Max CPU Temp (Tctl): {:.1} C", max_cpu_temp);
-        println!("Avg CCD1 Temp: {:.1} C", avg_cpu_ccd1);
-        println!("Max CCD1 Temp: {:.1} C", max_cpu_ccd1);
-        println!("Avg CCD2 Temp: {:.1} C", avg_cpu_ccd2);
-        println!("Max CCD2 Temp: {:.1} C", max_cpu_ccd2);
+        // A CPU column is null for every row when the sensor was unavailable, so
+        // these aggregates are themselves NULL. Report that, rather than failing
+        // the whole query or printing a fabricated 0.0.
+        for (label, value) in [
+            ("Avg CPU Temp (Tctl)", avg_cpu_temp),
+            ("Max CPU Temp (Tctl)", max_cpu_temp),
+            ("Avg CCD1 Temp", avg_cpu_ccd1),
+            ("Max CCD1 Temp", max_cpu_ccd1),
+            ("Avg CCD2 Temp", avg_cpu_ccd2),
+            ("Max CCD2 Temp", max_cpu_ccd2),
+        ] {
+            match value {
+                Some(value) => println!("{label}: {value:.1} C"),
+                None => println!("{label}: unavailable (sensor not readable during capture)"),
+            }
+        }
     }
 
     // Detecting "Inhibitory" Signals (Throttling)

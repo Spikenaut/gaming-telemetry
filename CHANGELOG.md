@@ -26,6 +26,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unwrapped against the ceiling.
 - The first poll no longer reports a power figure differentiated over an arbitrary
   startup window; a delta needs two samples, so the first is null.
+- **hwmon temperatures are signed millidegrees**, but were parsed as unsigned, so
+  a legitimate sub-zero reading failed to parse and was recorded as "sensor
+  unavailable". They now parse as `i64`.
+- A readable-but-frozen energy counter (VM passthrough, driver quirk) still
+  differentiates to a plausible `0.0 W`. A run of zero deltas is now reported: at a
+  5 ms poll even an idle package accumulates far more than RAPL counter resolution,
+  so a stalled counter is not an idle CPU.
+- Startup reporting covers each temperature input individually. CCD sensors do not
+  exist on every k10temp SKU, and a single unreadable input previously left one
+  column empty for a whole session with no notice.
+- An unreadable `max_energy_range_uj` is now reported at startup: without it a wrap
+  cannot be resolved, so power goes empty from the first wrap onward.
+- `query` reports unavailable CPU aggregates instead of failing. With nullable
+  columns, `avg`/`max` over an all-null column return NULL, which the `f64`
+  accessor rejected.
 - RAPL discovery now requires a counter it can actually *read*. It previously
   accepted any path that merely existed, which selected an unreadable root-only
   file and froze the counter at its initial value.
