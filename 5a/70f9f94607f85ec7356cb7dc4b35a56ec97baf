@@ -1,0 +1,21 @@
+src/timing.rs
+  s_61d9af33efccd3::t_bf2d50fa9a3cff 294-308,311-313
+  s_61d9af33efccd3::t_4bb42935cbe30e 309-310
+  s_61d9af33efccd3::t_f2e567fd059bdf 124-126,128-132,135-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "5a70f9f94607f85ec7356cb7dc4b35a56ec97baf",
+  "prompts": {},
+  "sessions": {
+    "s_61d9af33efccd3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c245a3ef-3cb2-4d94-af8b-0afd548a0d67",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
