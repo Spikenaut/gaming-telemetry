@@ -1,0 +1,21 @@
+src/bin/export_csv.rs
+  s_2a6b8586fd03bd::t_a18f5d764a68b7 8-11,37
+src/export.rs
+  s_2a6b8586fd03bd::t_a18f5d764a68b7 52-63,147-169,327-358
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "4537f2c19a036e6bfe34850abbb37d4ae525ed6c",
+  "prompts": {},
+  "sessions": {
+    "s_2a6b8586fd03bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "165490d3-edfc-485b-bac0-2e2f114b578c",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
