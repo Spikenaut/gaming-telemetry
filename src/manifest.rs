@@ -151,6 +151,54 @@ fn temp_path(dir: &Path) -> PathBuf {
     ))
 }
 
+/// Remove manifest temporaries left behind by a process that died between
+/// `create_new` and `rename`.
+///
+/// In-process failures clean up after themselves, but a SIGKILL (or a power loss)
+/// in that window strands the file forever. A collector that restarts often would
+/// otherwise accumulate them in the session directory indefinitely. Safe to run at
+/// startup: the caller holds the exclusive session lock, so no live writer owns a
+/// temporary here.
+pub fn sweep_stale_temporaries(dir: &Path) -> Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // A directory that does not exist yet simply has nothing to sweep.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to enumerate {} while sweeping stale manifests",
+                    crate::privacy::redact_personal_path(&dir.display().to_string())
+                )
+            });
+        }
+    };
+
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(MANIFEST_FILENAME) || !name.ends_with(".tmp") {
+            continue;
+        }
+        let is_file = entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false);
+        if !is_file {
+            continue;
+        }
+        // A failure here is not fatal: the stale file wastes space but blocks
+        // nothing, and refusing to start over it would be worse.
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 impl SessionManifest {
     pub fn new(
         session_id: String,
@@ -405,6 +453,70 @@ mod tests {
         assert_eq!(host.gpu_name, "unknown");
         assert_eq!(host.driver, "unknown");
         assert!(!host.cpu_model.is_empty());
+    }
+
+    /// A SIGKILL between `create_new` and `rename` strands a temporary that no
+    /// in-process cleanup can reach. Startup must reclaim it.
+    #[test]
+    fn sweep_removes_stale_temporaries_but_spares_real_files() {
+        let dir = temp_dir("sweep");
+        let stale_a = dir.join(format!("{MANIFEST_FILENAME}.999.123.0.tmp"));
+        let stale_b = dir.join(format!("{MANIFEST_FILENAME}.998.456.1.tmp"));
+        let manifest = dir.join(MANIFEST_FILENAME);
+        let unrelated = dir.join("canonical.csv");
+        let other_tmp = dir.join("something_else.tmp");
+        for path in [&stale_a, &stale_b, &manifest, &unrelated, &other_tmp] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        assert_eq!(sweep_stale_temporaries(&dir).unwrap(), 2);
+        assert!(!stale_a.exists() && !stale_b.exists());
+        assert!(
+            manifest.exists() && unrelated.exists() && other_tmp.exists(),
+            "the sweep must only claim its own temporaries"
+        );
+
+        // Idempotent: a second startup finds nothing left to do.
+        assert_eq!(sweep_stale_temporaries(&dir).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_of_a_missing_directory_is_not_an_error() {
+        assert_eq!(
+            sweep_stale_temporaries(Path::new("/nonexistent/session/dir")).unwrap(),
+            0
+        );
+    }
+
+    /// `WORKLOAD_CLASS` segments the training mix downstream; only its default
+    /// was previously exercised.
+    #[test]
+    fn workload_class_comes_from_the_environment_with_a_gaming_default() {
+        unsafe {
+            std::env::remove_var("WORKLOAD_CLASS");
+        }
+        assert_eq!(Workload::new("kcd2").class, "gaming");
+
+        unsafe {
+            std::env::set_var("WORKLOAD_CLASS", "  benchmark  ");
+        }
+        let workload = Workload::new("kcd2");
+        assert_eq!(workload.class, "benchmark", "value is trimmed");
+        assert_eq!(workload.label, "kcd2");
+
+        unsafe {
+            std::env::set_var("WORKLOAD_CLASS", "   ");
+        }
+        assert_eq!(
+            Workload::new("kcd2").class,
+            "gaming",
+            "a whitespace-only value falls back to the default"
+        );
+
+        unsafe {
+            std::env::remove_var("WORKLOAD_CLASS");
+        }
     }
 
     #[test]
