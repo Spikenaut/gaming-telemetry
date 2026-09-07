@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_03f3ba35c80520::t_d73ee8a727087d 23-27,30-35,37-42,44-66,81,92,94,109-110,135,138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "f9d6deaffdb141aa38831f29895319d70b3bd59c",
+  "prompts": {},
+  "sessions": {
+    "s_03f3ba35c80520": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a90a8c35-2322-4fdc-a202-59e03efe95c7",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
