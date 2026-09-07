@@ -193,6 +193,12 @@ pub struct SweepOutcome {
     pub removed: usize,
     /// Temporaries that matched but could not be deleted.
     pub failed: Vec<PathBuf>,
+    /// Directory entries that could not be read at all.
+    ///
+    /// Each one may have been a stale temporary the sweep has now failed to
+    /// reclaim, so a non-zero count means "swept, but not exhaustively" — which
+    /// the caller must be able to say rather than reporting a clean sweep.
+    pub unreadable_entries: usize,
 }
 
 /// The path of `entry`, if it is a generated manifest temporary.
@@ -227,7 +233,17 @@ pub fn sweep_stale_temporaries(dir: &Path) -> Result<SweepOutcome> {
     // returned rather than dropped, so it can be reported instead of recurring
     // silently on every restart.
     let mut outcome = SweepOutcome::default();
-    for path in entries.flatten().filter_map(|e| stale_temporary_path(&e)) {
+    for entry in entries {
+        // `ReadDir` can fail per entry after the directory opened — an I/O error
+        // on a mounted SESSION_DIR, say. Dropping those made a partial sweep
+        // indistinguishable from a complete one.
+        let Ok(entry) = entry else {
+            outcome.unreadable_entries += 1;
+            continue;
+        };
+        let Some(path) = stale_temporary_path(&entry) else {
+            continue;
+        };
         match std::fs::remove_file(&path) {
             Ok(()) => outcome.removed += 1,
             Err(_) => outcome.failed.push(path),

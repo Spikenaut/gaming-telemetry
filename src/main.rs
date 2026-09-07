@@ -277,6 +277,15 @@ async fn main() -> Result<()> {
                     outcome.removed
                 );
             }
+            if outcome.unreadable_entries > 0 {
+                report_failure(
+                    "Stale-manifest sweep was not exhaustive",
+                    &format!(
+                        "{} directory entr(y/ies) could not be read;                          any stale temporary among them remains",
+                        outcome.unreadable_entries
+                    ),
+                );
+            }
             // Surfaced rather than dropped: an undeletable temporary otherwise
             // recurs on every restart with no diagnostic.
             for path in &outcome.failed {
