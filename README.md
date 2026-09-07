@@ -192,7 +192,7 @@ Unless the collector can read that file, `cpu_package_power_w` is null for the
 whole session. The collector says so on startup rather than leaving you to find
 out after the capture:
 
-```
+```text
 CPU package power unavailable: no readable RAPL energy counter. ...
 ```
 

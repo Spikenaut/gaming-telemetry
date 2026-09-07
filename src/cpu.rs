@@ -231,6 +231,15 @@ fn power_watts(
         return None;
     }
 
+    // A counter cannot legitimately read past its own wrap point. If either
+    // reading is out of spec, no delta drawn from them is trustworthy — including
+    // the forward case, which would otherwise compute and persist a number.
+    if let Some(max) = max_range_uj
+        && (previous_uj > max || current_uj > max)
+    {
+        return None;
+    }
+
     let delta_uj = if current_uj >= previous_uj {
         current_uj - previous_uj
     } else {
@@ -238,9 +247,6 @@ fn power_watts(
         // is ~65 kJ — roughly every 11 minutes at 100 W, so this is the ordinary
         // case during a long capture, not an anomaly.
         let max = max_range_uj?;
-        if previous_uj > max {
-            return None;
-        }
         (max - previous_uj).checked_add(current_uj)?
     };
 
@@ -310,8 +316,18 @@ mod tests {
     }
 
     #[test]
-    fn a_previous_reading_above_the_ceiling_is_unmeasurable() {
+    fn a_reading_above_the_ceiling_is_unmeasurable_in_either_direction() {
+        // Backwards past the ceiling.
         assert_eq!(power_watts(MAX_RANGE + 1, 1, Some(MAX_RANGE), 0.005), None);
+        // Forwards past the ceiling: this one previously computed a delta from an
+        // out-of-spec reading and persisted the result.
+        assert_eq!(
+            power_watts(1, MAX_RANGE + 1, Some(MAX_RANGE), 0.005),
+            None,
+            "an over-range current reading must not yield a value"
+        );
+        // With no known ceiling there is nothing to validate against.
+        assert!(power_watts(1, MAX_RANGE + 1, None, 0.005).is_some());
     }
 
     #[test]

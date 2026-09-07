@@ -632,7 +632,37 @@ mod tests {
         sample.cpu_ccd2_c = None;
         sample.cpu_package_power_w = None;
 
-        let df = build_batch_frame(&[sample]).expect("frame");
+        // Go through the real storage boundary: an in-memory frame cannot catch a
+        // null-encoding regression in the Parquet writer.
+        let tmp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-fixtures")
+            .join(format!(
+                "gt_null_cpu_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let batch_id = 7;
+        write_to_parquet(vec![sample], batch_id, &tmp).expect("parquet write");
+
+        let path = tmp.join(format!(
+            "{}{}{}",
+            session::BATCH_PREFIX,
+            batch_id,
+            session::BATCH_SUFFIX
+        ));
+        let df = LazyFrame::scan_parquet(
+            PlRefPath::try_from_path(&path).unwrap(),
+            ScanArgsParquet::default(),
+        )
+        .unwrap()
+        .collect()
+        .unwrap();
+
         for column in [
             "cpu_tctl_c",
             "cpu_ccd1_c",
@@ -643,6 +673,8 @@ mod tests {
             assert_eq!(values.get(0), None, "{column} must be null, not 0.0");
             assert_eq!(values.null_count(), 1, "{column} must record a null");
         }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
