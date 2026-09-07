@@ -214,11 +214,36 @@ impl CpuMonitor {
     }
 }
 
+/// Energy consumed between two counter readings, in microjoules.
+///
+/// `None` when the pair cannot yield a trustworthy delta: a reading past the
+/// counter's own wrap point, or a backwards step with no known ceiling to unwrap
+/// against. Separated from the watts conversion so each half stays simple enough
+/// to read at a glance.
+fn energy_delta_uj(previous_uj: u64, current_uj: u64, max_range_uj: Option<u64>) -> Option<u64> {
+    // A counter cannot legitimately read past its own wrap point. If either
+    // reading is out of spec, no delta drawn from them is trustworthy — including
+    // the forward case, which would otherwise compute and persist a number.
+    if let Some(max) = max_range_uj
+        && (previous_uj > max || current_uj > max)
+    {
+        return None;
+    }
+
+    if current_uj >= previous_uj {
+        return Some(current_uj - previous_uj);
+    }
+
+    // RAPL counters wrap at `max_energy_range_uj`, which on a typical desktop is
+    // ~65 kJ — roughly every 11 minutes at 100 W, so this is the ordinary case
+    // during a long capture, not an anomaly.
+    let max = max_range_uj?;
+    (max - previous_uj).checked_add(current_uj)
+}
+
 /// Convert an energy-counter delta into average watts over the interval.
 ///
-/// Returns `None` when the interval is unusable rather than substituting a zero:
-/// a non-positive elapsed time (a repeated tick), or a counter that ran backwards
-/// with no known ceiling to unwrap it against.
+/// Returns `None` when the interval is unusable rather than substituting a zero.
 fn power_watts(
     previous_uj: u64,
     current_uj: u64,
@@ -231,25 +256,7 @@ fn power_watts(
         return None;
     }
 
-    // A counter cannot legitimately read past its own wrap point. If either
-    // reading is out of spec, no delta drawn from them is trustworthy — including
-    // the forward case, which would otherwise compute and persist a number.
-    if let Some(max) = max_range_uj
-        && (previous_uj > max || current_uj > max)
-    {
-        return None;
-    }
-
-    let delta_uj = if current_uj >= previous_uj {
-        current_uj - previous_uj
-    } else {
-        // RAPL counters wrap at `max_energy_range_uj`, which on a typical desktop
-        // is ~65 kJ — roughly every 11 minutes at 100 W, so this is the ordinary
-        // case during a long capture, not an anomaly.
-        let max = max_range_uj?;
-        (max - previous_uj).checked_add(current_uj)?
-    };
-
+    let delta_uj = energy_delta_uj(previous_uj, current_uj, max_range_uj)?;
     let watts = (delta_uj as f64 / 1_000_000.0) / elapsed_sec;
     watts.is_finite().then_some(watts as f32)
 }
@@ -284,7 +291,7 @@ fn read_u64_file(path: &Path) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuMonitor, power_watts};
+    use super::{CpuMonitor, energy_delta_uj, power_watts};
 
     const MAX_RANGE: u64 = 65_532_610_987;
 
@@ -313,6 +320,24 @@ mod tests {
     #[test]
     fn counter_going_backwards_without_a_ceiling_is_unmeasurable() {
         assert_eq!(power_watts(1_000_000, 1, None, 0.005), None);
+    }
+
+    /// The delta half in isolation: wrap arithmetic and the out-of-spec guard,
+    /// without the watts conversion on top.
+    #[test]
+    fn energy_delta_unwraps_and_rejects_out_of_range() {
+        assert_eq!(energy_delta_uj(100, 400, Some(MAX_RANGE)), Some(300));
+        assert_eq!(
+            energy_delta_uj(MAX_RANGE - 400_000, 100_000, Some(MAX_RANGE)),
+            Some(500_000)
+        );
+        assert_eq!(
+            energy_delta_uj(400, 100, None),
+            None,
+            "no ceiling to unwrap"
+        );
+        assert_eq!(energy_delta_uj(MAX_RANGE + 1, 1, Some(MAX_RANGE)), None);
+        assert_eq!(energy_delta_uj(1, MAX_RANGE + 1, Some(MAX_RANGE)), None);
     }
 
     #[test]
