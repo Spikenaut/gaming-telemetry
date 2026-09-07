@@ -33,10 +33,11 @@ struct GpuSample {
     encoder_util_perc: u32,
     decoder_util_perc: u32,
     // CPU telemetry
-    cpu_tctl_c: f32,
-    cpu_ccd1_c: f32,
-    cpu_ccd2_c: f32,
-    cpu_package_power_w: f32,
+    // `None` means the sensor was unavailable, not that it read zero.
+    cpu_tctl_c: Option<f32>,
+    cpu_ccd1_c: Option<f32>,
+    cpu_ccd2_c: Option<f32>,
+    cpu_package_power_w: Option<f32>,
 }
 
 const BUFFER_SIZE: usize = 2000; // ~10 seconds of data at default 5ms intervals
@@ -82,10 +83,10 @@ fn build_batch_frame(samples: &[GpuSample]) -> Result<DataFrame> {
         "memory_total_mb": u64 = |s| s.memory_total_mb,
         "encoder_util_perc": u32 = |s| s.encoder_util_perc,
         "decoder_util_perc": u32 = |s| s.decoder_util_perc,
-        "cpu_tctl_c": f32 = |s| s.cpu_tctl_c,
-        "cpu_ccd1_c": f32 = |s| s.cpu_ccd1_c,
-        "cpu_ccd2_c": f32 = |s| s.cpu_ccd2_c,
-        "cpu_package_power_w": f32 = |s| s.cpu_package_power_w,
+        "cpu_tctl_c": Option<f32> = |s| s.cpu_tctl_c,
+        "cpu_ccd1_c": Option<f32> = |s| s.cpu_ccd1_c,
+        "cpu_ccd2_c": Option<f32> = |s| s.cpu_ccd2_c,
+        "cpu_package_power_w": Option<f32> = |s| s.cpu_package_power_w,
     );
     Ok(DataFrame::new(samples.len(), columns)?)
 }
@@ -348,9 +349,7 @@ async fn main() -> Result<()> {
                 let decoder_util = device.decoder_utilization().map(|u| u.utilization).unwrap_or(0);
 
                 // CPU telemetry (poll for time-delta power calculation)
-                let (cpu_tctl_c, cpu_package_power_w) = cpu_monitor.poll();
-                let cpu_ccd1_c = cpu_monitor.read_ccd1();
-                let cpu_ccd2_c = cpu_monitor.read_ccd2();
+                let cpu = cpu_monitor.poll();
 
                 let sample = GpuSample {
                     timestamp: Utc::now(),
@@ -368,10 +367,10 @@ async fn main() -> Result<()> {
                     memory_total_mb: mem_info.as_ref().map(|m| m.total / 1024 / 1024).unwrap_or(0),
                     encoder_util_perc: encoder_util,
                     decoder_util_perc: decoder_util,
-                    cpu_tctl_c,
-                    cpu_ccd1_c,
-                    cpu_ccd2_c,
-                    cpu_package_power_w,
+                    cpu_tctl_c: cpu.tctl_c,
+                    cpu_ccd1_c: cpu.ccd1_c,
+                    cpu_ccd2_c: cpu.ccd2_c,
+                    cpu_package_power_w: cpu.package_power_w,
                 };
 
                 // Measure when telemetry was actually obtained, not the Tokio
@@ -465,10 +464,10 @@ mod tests {
             memory_total_mb: 16_000,
             encoder_util_perc: 0,
             decoder_util_perc: 0,
-            cpu_tctl_c: 55.0,
-            cpu_ccd1_c: 50.0,
-            cpu_ccd2_c: 51.0,
-            cpu_package_power_w: 80.0,
+            cpu_tctl_c: Some(55.0),
+            cpu_ccd1_c: Some(50.0),
+            cpu_ccd2_c: Some(51.0),
+            cpu_package_power_w: Some(80.0),
         }
     }
 
@@ -615,12 +614,67 @@ mod tests {
                 .f32()
                 .unwrap()
                 .get(0),
-            Some(fixture.cpu_package_power_w)
+            fixture.cpu_package_power_w
         );
         assert_eq!(
             df.column("session_label").unwrap().str().unwrap().get(0),
             Some("re4r")
         );
+    }
+
+    /// The whole point of the `Option` columns: an unreadable sensor must reach
+    /// Parquet as a null, never as a plausible 0.0 that a model would learn from.
+    #[test]
+    fn unavailable_cpu_sensors_round_trip_as_nulls_not_zeros() {
+        let mut sample = sample_fixture("kcd2");
+        sample.cpu_tctl_c = None;
+        sample.cpu_ccd1_c = None;
+        sample.cpu_ccd2_c = None;
+        sample.cpu_package_power_w = None;
+
+        // Go through the real storage boundary: an in-memory frame cannot catch a
+        // null-encoding regression in the Parquet writer.
+        let tmp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-fixtures")
+            .join(format!(
+                "gt_null_cpu_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let batch_id = 7;
+        write_to_parquet(vec![sample], batch_id, &tmp).expect("parquet write");
+
+        let path = tmp.join(format!(
+            "{}{}{}",
+            session::BATCH_PREFIX,
+            batch_id,
+            session::BATCH_SUFFIX
+        ));
+        let df = LazyFrame::scan_parquet(
+            PlRefPath::try_from_path(&path).unwrap(),
+            ScanArgsParquet::default(),
+        )
+        .unwrap()
+        .collect()
+        .unwrap();
+
+        for column in [
+            "cpu_tctl_c",
+            "cpu_ccd1_c",
+            "cpu_ccd2_c",
+            "cpu_package_power_w",
+        ] {
+            let values = df.column(column).unwrap().f32().unwrap();
+            assert_eq!(values.get(0), None, "{column} must be null, not 0.0");
+            assert_eq!(values.null_count(), 1, "{column} must record a null");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
