@@ -196,8 +196,12 @@ counter readings over the interval between them — so it is null in more cases 
 | Reading out of range | either counter value exceeds `max_energy_range_uj` |
 | Unusable interval | elapsed time was not positive and finite |
 
-So expect exactly one null at the start of every session even on a fully working
-machine, and treat a null as "unknown for this sample", not "sensor absent".
+Expect one startup null at the beginning of **each collector run**, even on a
+fully working machine — the energy counter is re-seeded by every new process. A
+session that was restarted therefore contains one startup null *per run*, so their
+count tracks `restart_count` in the manifest rather than being a single occurrence.
+
+Treat a null as "unknown for this sample", not "sensor absent".
 
 This matters most for package power. Since
 [CVE-2020-8694](https://nvd.nist.gov/vuln/detail/CVE-2020-8694), RAPL's
