@@ -83,6 +83,11 @@ pub struct TimingStats {
 
 impl TimingStats {
     pub fn new(requested_ms: u64) -> Self {
+        // `parse_poll_interval_ms` rejects zero, so this only fires on a direct
+        // construction. Zero would make every `skipped_tick_estimate` division
+        // return `None`, silently reporting zero skipped ticks forever rather
+        // than surfacing the misconfiguration.
+        debug_assert!(requested_ms > 0, "TimingStats needs a non-zero cadence");
         Self {
             requested_ms,
             sample_count: 0,
@@ -114,12 +119,16 @@ impl TimingStats {
 
     /// Interval ingestion split out from the clock so it can be unit tested.
     fn record_interval_us(&mut self, delta_us: u64) {
-        let index = (delta_us / BUCKET_US) as usize;
+        // Checked, not `as`: on a 32-bit target an extreme stall would otherwise
+        // wrap into a small index and be misfiled as a fast sample — corrupting
+        // exactly the tail the histogram exists to measure.
+        let index = usize::try_from(delta_us / BUCKET_US).unwrap_or(usize::MAX);
         if let Some(bucket) = self.buckets.get_mut(index) {
             *bucket += 1;
         } else if delta_us < TAIL_CEILING_US {
             let tail_index =
-                ((delta_us - (BUCKET_COUNT as u64 * BUCKET_US)) / TAIL_BUCKET_US) as usize;
+                usize::try_from((delta_us - (BUCKET_COUNT as u64 * BUCKET_US)) / TAIL_BUCKET_US)
+                    .unwrap_or(usize::MAX);
             self.tail_buckets[tail_index] += 1;
         } else {
             let mut upper = TAIL_CEILING_US;
