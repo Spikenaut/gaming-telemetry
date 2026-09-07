@@ -90,8 +90,14 @@ pub struct PriorRun {
 
 impl Workload {
     pub fn new(label: &str) -> Self {
-        let class = std::env::var("WORKLOAD_CLASS")
-            .ok()
+        Self::with_class(std::env::var("WORKLOAD_CLASS").ok(), label)
+    }
+
+    /// Class selection split from the environment lookup, so the rules can be
+    /// tested without mutating process env — which is `unsafe` under edition 2024
+    /// and races other tests in the same process.
+    fn with_class(raw_class: Option<String>, label: &str) -> Self {
+        let class = raw_class
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "gaming".to_owned());
@@ -159,6 +165,21 @@ fn temp_path(dir: &Path) -> PathBuf {
 /// otherwise accumulate them in the session directory indefinitely. Safe to run at
 /// startup: the caller holds the exclusive session lock, so no live writer owns a
 /// temporary here.
+/// The path of `entry`, if it is a manifest temporary this sweep owns.
+///
+/// Deliberately narrow: only this module's own `session_manifest.json*.tmp`
+/// naming, and only regular files. A foreign `.tmp`, a directory or a FIFO that
+/// happens to match is left alone.
+fn stale_temporary_path(entry: &std::fs::DirEntry) -> Option<PathBuf> {
+    let name = entry.file_name();
+    let name = name.to_str()?;
+    if !name.starts_with(MANIFEST_FILENAME) || !name.ends_with(".tmp") {
+        return None;
+    }
+    entry.file_type().ok().filter(|kind| kind.is_file())?;
+    Some(entry.path())
+}
+
 pub fn sweep_stale_temporaries(dir: &Path) -> Result<usize> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -174,28 +195,13 @@ pub fn sweep_stale_temporaries(dir: &Path) -> Result<usize> {
         }
     };
 
-    let mut removed = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with(MANIFEST_FILENAME) || !name.ends_with(".tmp") {
-            continue;
-        }
-        let is_file = entry
-            .file_type()
-            .map(|kind| kind.is_file())
-            .unwrap_or(false);
-        if !is_file {
-            continue;
-        }
-        // A failure here is not fatal: the stale file wastes space but blocks
-        // nothing, and refusing to start over it would be worse.
-        if std::fs::remove_file(entry.path()).is_ok() {
-            removed += 1;
-        }
-    }
+    // A failed removal is not fatal: the stale file wastes space but blocks
+    // nothing, and refusing to start a capture over it would be worse.
+    let removed = entries
+        .flatten()
+        .filter_map(|entry| stale_temporary_path(&entry))
+        .filter(|path| std::fs::remove_file(path).is_ok())
+        .count();
     Ok(removed)
 }
 
@@ -493,30 +499,18 @@ mod tests {
     /// was previously exercised.
     #[test]
     fn workload_class_comes_from_the_environment_with_a_gaming_default() {
-        unsafe {
-            std::env::remove_var("WORKLOAD_CLASS");
-        }
-        assert_eq!(Workload::new("kcd2").class, "gaming");
-
-        unsafe {
-            std::env::set_var("WORKLOAD_CLASS", "  benchmark  ");
-        }
-        let workload = Workload::new("kcd2");
-        assert_eq!(workload.class, "benchmark", "value is trimmed");
-        assert_eq!(workload.label, "kcd2");
-
-        unsafe {
-            std::env::set_var("WORKLOAD_CLASS", "   ");
-        }
+        assert_eq!(Workload::with_class(None, "kcd2").class, "gaming");
         assert_eq!(
-            Workload::new("kcd2").class,
+            Workload::with_class(Some("  benchmark  ".to_owned()), "kcd2").class,
+            "benchmark",
+            "the value is trimmed"
+        );
+        assert_eq!(
+            Workload::with_class(Some("   ".to_owned()), "kcd2").class,
             "gaming",
             "a whitespace-only value falls back to the default"
         );
-
-        unsafe {
-            std::env::remove_var("WORKLOAD_CLASS");
-        }
+        assert_eq!(Workload::with_class(None, "kcd2").label, "kcd2");
     }
 
     #[test]
