@@ -49,6 +49,18 @@ pub fn batch_files_in(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut batches: Vec<(u32, PathBuf)> = Vec::new();
     for entry in entries {
         let entry = entry.context("failed to enumerate a session directory entry")?;
+
+        // Match on the entry being a regular file, not just on its name. A
+        // directory sharing the batch name would fail confusingly at scan time,
+        // and a FIFO would block the export indefinitely.
+        let is_file = entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false);
+        if !is_file {
+            continue;
+        }
+
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -130,6 +142,29 @@ pub fn canonical_frame(paths: &[PathBuf]) -> Result<DataFrame> {
     combined
         .collect()
         .context("failed to build the canonical export frame")
+}
+
+/// Write CSV to `path` without truncating an existing export on failure.
+///
+/// A direct write truncates the destination before the new bytes land, so an I/O
+/// failure part-way leaves a consumer with a partial or empty CSV that still looks
+/// like a valid export. Writing beside the target and renaming makes the
+/// replacement atomic.
+///
+/// (This is the third temp-then-rename site in the tree, after `manifest.rs` and
+/// the Parquet writer in `main.rs`; consolidating them is tracked separately.)
+pub fn write_csv_atomically(path: &Path, csv: &str) -> Result<()> {
+    let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+    let redacted = || redact_personal_path(&path.display().to_string());
+
+    std::fs::write(&temporary, csv)
+        .with_context(|| format!("failed to write the temporary export beside {}", redacted()))?;
+
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("failed to publish {}", redacted()));
+    }
+    Ok(())
 }
 
 /// Render the canonical frame as CSV with a single header row.
@@ -286,6 +321,41 @@ mod tests {
     fn a_directory_without_batches_is_an_error() {
         let dir = fixture_dir("empty");
         assert!(resolve_inputs(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory that happens to match the batch name must not be treated as a
+    /// batch: it would fail confusingly at scan time instead of being skipped.
+    #[test]
+    fn non_regular_entries_are_not_treated_as_batches() {
+        let dir = fixture_dir("entry_kinds");
+        write_batch(&dir, 1, &[1], "kcd2");
+        std::fs::create_dir(dir.join(format!("{BATCH_PREFIX}2{BATCH_SUFFIX}"))).unwrap();
+
+        let files = batch_files_in(&dir).unwrap();
+        assert_eq!(files.len(), 1, "only the regular file is a batch");
+        assert!(files[0].is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed export must not leave a truncated file where a good one was.
+    #[test]
+    fn writing_csv_replaces_atomically_and_leaves_no_temp_file() {
+        let dir = fixture_dir("atomic");
+        let target = dir.join("canonical.csv");
+        std::fs::write(&target, "stale,contents\n").unwrap();
+
+        write_csv_atomically(&target, "a,b\n1,2\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "a,b\n1,2\n");
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains(".tmp.")),
+            "a successful write leaves no temporary behind"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

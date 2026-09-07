@@ -5,8 +5,10 @@
 //! Accepts either a whole session directory (every batch, in order, one header) or
 //! a single batch file. The column contract lives in `gaming_telemetry::export`.
 
-use anyhow::{Context, Result};
-use gaming_telemetry::export::{CANONICAL_COLUMNS, canonical_frame, resolve_inputs, to_csv};
+use anyhow::Result;
+use gaming_telemetry::export::{
+    CANONICAL_COLUMNS, canonical_frame, resolve_inputs, to_csv, write_csv_atomically,
+};
 use std::path::Path;
 
 fn main() -> Result<()> {
@@ -32,8 +34,7 @@ fn main() -> Result<()> {
     if output_file == "-" {
         print!("{csv}");
     } else {
-        std::fs::write(output_file, &csv)
-            .with_context(|| format!("failed to write {output_file}"))?;
+        write_csv_atomically(Path::new(output_file), &csv)?;
         println!(
             "Exported {} rows from {} batch(es) to {}",
             df.height(),
