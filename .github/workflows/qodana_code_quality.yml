@@ -3,9 +3,8 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: # Specify your branches here
-      - main # The 'main' branch
-      - 'releases/*' # The release branches
+    branches:
+      - main
 
 jobs:
   qodana:
@@ -23,7 +22,11 @@ jobs:
       - name: 'Qodana Scan'
         uses: JetBrains/qodana-action@4861e015da555e86a72b862892aba6c2b93e6891 # v2026.1.3
         with:
-          pr-mode: false
+          # Analyse only the pull request's own changes. With pr-mode off, a PR run
+          # reports whole-repo baseline findings, so a review is annotated with
+          # problems the PR did not introduce. Push builds keep the full scan, which
+          # is what maintains the baseline those PR runs compare against.
+          pr-mode: ${{ github.event_name == 'pull_request' }}
         env:
           QODANA_TOKEN: ${{ secrets.QODANA_TOKEN_1849579870 }}
           QODANA_ENDPOINT: 'https://qodana.cloud'
