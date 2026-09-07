@@ -13,7 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `create_new` and `rename` stranded the temporary permanently. A collector that
   restarts often accumulated them in the session directory indefinitely. The sweep
   runs under the exclusive session lock, so it can only ever claim files no live
-  writer owns, and it matches only its own `session_manifest.json*.tmp` names.
+  writer owns, and it matches only the exact shape it generates —
+  `session_manifest.json.<pid>.<nanos>.<sequence>.tmp`, all three numeric. An
+  operator's `session_manifest.json.backup.tmp` is deliberately spared. A
+  temporary that cannot be deleted is reported rather than dropped.
 
 - **The build was broken.** The dependency bump to `polars 0.55.2` changed
   `LazyFrame::scan_parquet` to take a `PlRefPath`, made `DataFrame::new` take an

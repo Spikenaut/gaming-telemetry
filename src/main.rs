@@ -270,8 +270,22 @@ async fn main() -> Result<()> {
     // Only safe under the exclusive lock: no other collector owns a temporary in
     // this directory, so anything left is from a process that was killed mid-write.
     match manifest::sweep_stale_temporaries(&output_dir) {
-        Ok(0) => {}
-        Ok(removed) => println!("Removed {removed} stale manifest temporary file(s)."),
+        Ok(outcome) => {
+            if outcome.removed > 0 {
+                println!(
+                    "Removed {} stale manifest temporary file(s).",
+                    outcome.removed
+                );
+            }
+            // Surfaced rather than dropped: an undeletable temporary otherwise
+            // recurs on every restart with no diagnostic.
+            for path in &outcome.failed {
+                report_failure(
+                    "Could not remove a stale manifest temporary",
+                    &path.display().to_string(),
+                );
+            }
+        }
         Err(e) => report_failure(
             "Could not sweep stale manifest temporaries",
             &format!("{e:?}"),

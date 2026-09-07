@@ -165,26 +165,53 @@ fn temp_path(dir: &Path) -> PathBuf {
 /// otherwise accumulate them in the session directory indefinitely. Safe to run at
 /// startup: the caller holds the exclusive session lock, so no live writer owns a
 /// temporary here.
-/// The path of `entry`, if it is a manifest temporary this sweep owns.
+/// True only for the exact filename shape `temp_path` generates:
+/// `session_manifest.json.<pid>.<nanos>.<sequence>.tmp`, all three numeric.
 ///
-/// Deliberately narrow: only this module's own `session_manifest.json*.tmp`
-/// naming, and only regular files. A foreign `.tmp`, a directory or a FIFO that
-/// happens to match is left alone.
+/// Deliberately not a `session_manifest.json*.tmp` glob. The sweep deletes files,
+/// so it must recognise only what this module itself writes — an operator's
+/// `session_manifest.json.backup.tmp` matches the loose pattern and is exactly the
+/// kind of file that must survive.
+fn is_generated_temporary(name: &str) -> bool {
+    let Some(fields) = name
+        .strip_prefix(MANIFEST_FILENAME)
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    let fields: Vec<&str> = fields.split('.').collect();
+    fields.len() == 3
+        && fields
+            .iter()
+            .all(|field| !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// What a sweep did, so the caller can report both halves.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepOutcome {
+    pub removed: usize,
+    /// Temporaries that matched but could not be deleted.
+    pub failed: Vec<PathBuf>,
+}
+
+/// The path of `entry`, if it is a generated manifest temporary.
 fn stale_temporary_path(entry: &std::fs::DirEntry) -> Option<PathBuf> {
     let name = entry.file_name();
-    let name = name.to_str()?;
-    if !name.starts_with(MANIFEST_FILENAME) || !name.ends_with(".tmp") {
+    if !is_generated_temporary(name.to_str()?) {
         return None;
     }
     entry.file_type().ok().filter(|kind| kind.is_file())?;
     Some(entry.path())
 }
 
-pub fn sweep_stale_temporaries(dir: &Path) -> Result<usize> {
+pub fn sweep_stale_temporaries(dir: &Path) -> Result<SweepOutcome> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         // A directory that does not exist yet simply has nothing to sweep.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SweepOutcome::default());
+        }
         Err(error) => {
             return Err(error).with_context(|| {
                 format!(
@@ -195,14 +222,18 @@ pub fn sweep_stale_temporaries(dir: &Path) -> Result<usize> {
         }
     };
 
-    // A failed removal is not fatal: the stale file wastes space but blocks
-    // nothing, and refusing to start a capture over it would be worse.
-    let removed = entries
-        .flatten()
-        .filter_map(|entry| stale_temporary_path(&entry))
-        .filter(|path| std::fs::remove_file(path).is_ok())
-        .count();
-    Ok(removed)
+    // A failed removal is not fatal -- stale debris wastes space but blocks
+    // nothing, and refusing to start a capture over it would be worse -- but it is
+    // returned rather than dropped, so it can be reported instead of recurring
+    // silently on every restart.
+    let mut outcome = SweepOutcome::default();
+    for path in entries.flatten().filter_map(|e| stale_temporary_path(&e)) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => outcome.removed += 1,
+            Err(_) => outcome.failed.push(path),
+        }
+    }
+    Ok(outcome)
 }
 
 impl SessionManifest {
@@ -471,19 +502,73 @@ mod tests {
         let manifest = dir.join(MANIFEST_FILENAME);
         let unrelated = dir.join("canonical.csv");
         let other_tmp = dir.join("something_else.tmp");
-        for path in [&stale_a, &stale_b, &manifest, &unrelated, &other_tmp] {
+        // An operator's own backup matches a loose `*.tmp` glob and must survive.
+        let backup = dir.join(format!("{MANIFEST_FILENAME}.backup.tmp"));
+        for path in [
+            &stale_a, &stale_b, &manifest, &unrelated, &other_tmp, &backup,
+        ] {
             std::fs::write(path, b"x").unwrap();
         }
 
-        assert_eq!(sweep_stale_temporaries(&dir).unwrap(), 2);
+        let outcome = sweep_stale_temporaries(&dir).unwrap();
+        assert_eq!(outcome.removed, 2);
+        assert!(outcome.failed.is_empty());
         assert!(!stale_a.exists() && !stale_b.exists());
         assert!(
-            manifest.exists() && unrelated.exists() && other_tmp.exists(),
-            "the sweep must only claim its own temporaries"
+            manifest.exists() && unrelated.exists() && other_tmp.exists() && backup.exists(),
+            "the sweep must only claim the names it generates"
         );
 
         // Idempotent: a second startup finds nothing left to do.
-        assert_eq!(sweep_stale_temporaries(&dir).unwrap(), 0);
+        assert_eq!(sweep_stale_temporaries(&dir).unwrap().removed, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only the generated `<pid>.<nanos>.<sequence>` shape, all numeric.
+    #[test]
+    fn only_generated_temporary_names_are_swept() {
+        for name in [
+            "session_manifest.json.1.2.3.tmp",
+            "session_manifest.json.999999.1788746199000000000.42.tmp",
+        ] {
+            assert!(is_generated_temporary(name), "{name} should match");
+        }
+        for name in [
+            "session_manifest.json.backup.tmp",  // an operator's backup
+            "session_manifest.json.tmp",         // no fields
+            "session_manifest.json.1.2.tmp",     // too few fields
+            "session_manifest.json.1.2.3.4.tmp", // too many fields
+            "session_manifest.json.1.2.x.tmp",   // non-numeric field
+            "session_manifest.json.1..3.tmp",    // empty field
+            "session_manifest.json",             // the real manifest
+            "other.json.1.2.3.tmp",              // a different file
+        ] {
+            assert!(!is_generated_temporary(name), "{name} must be spared");
+        }
+    }
+
+    /// A temporary that cannot be deleted is returned, not silently dropped --
+    /// otherwise it recurs on every restart with no diagnostic.
+    #[cfg(unix)]
+    #[test]
+    fn undeletable_temporaries_are_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("sweep_fail");
+        let guarded = dir.join("guarded");
+        std::fs::create_dir_all(&guarded).unwrap();
+        let stuck = guarded.join(format!("{MANIFEST_FILENAME}.1.2.3.tmp"));
+        std::fs::write(&stuck, b"x").unwrap();
+        // Removing a directory entry needs write permission on the directory.
+        std::fs::set_permissions(&guarded, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let outcome = sweep_stale_temporaries(&guarded).unwrap();
+        // Running as root defeats the permission bits, so only assert when it took.
+        if outcome.removed == 0 {
+            assert_eq!(outcome.failed, vec![stuck], "the failure must be surfaced");
+        }
+
+        let _ = std::fs::set_permissions(&guarded, std::fs::Permissions::from_mode(0o755));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -491,7 +576,7 @@ mod tests {
     fn sweep_of_a_missing_directory_is_not_an_error() {
         assert_eq!(
             sweep_stale_temporaries(Path::new("/nonexistent/session/dir")).unwrap(),
-            0
+            SweepOutcome::default()
         );
     }
 
