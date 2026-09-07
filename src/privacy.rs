@@ -21,14 +21,30 @@ fn redact_with_home(text: &str, home: &str) -> String {
     text.replace(home, "$HOME")
 }
 
+/// Directory names that sit where a username would but never name an account.
+///
+/// Treating one of these as a username is actively harmful: with `HOME=/home`,
+/// the derived name `home` rewrites `/home/alice/data` into `/$USER/alice/data`,
+/// redacting the *directory* and leaving the operator's name exposed.
+const NEVER_A_USERNAME: [&str; 10] = [
+    "home", "root", "users", "media", "mnt", "run", "var", "tmp", "usr", "proc",
+];
+
+/// Whether `name` can be treated as an account name worth redacting.
+///
+/// Short names are refused because a two-character component collides with too
+/// much (`/a/b/c`), and `root` identifies nobody while appearing throughout
+/// legitimate system paths.
+fn plausible_username(name: &str) -> bool {
+    name.len() >= 3 && !NEVER_A_USERNAME.contains(&name)
+}
+
 /// Replace whole path components equal to `user` with `$USER`.
 ///
 /// Component-wise rather than substring: replacing bare occurrences would mangle
 /// unrelated words that merely contain the name (`alice` inside `/opt/alicent`).
-/// Very short names are skipped for the same reason, and `root` is left alone —
-/// it identifies nobody and appears in legitimate system paths.
 fn redact_user_components(text: &str, user: &str) -> String {
-    if user.len() < 3 || user == "root" {
+    if !plausible_username(user) {
         return text.to_string();
     }
     text.split('/')
@@ -53,7 +69,7 @@ fn redact_user_components(text: &str, user: &str) -> String {
 /// never goes through the home directory.
 fn current_user_identities() -> Vec<String> {
     let mut identities: Vec<String> = Vec::new();
-    let mut push = |identities: &mut Vec<String>, value: String| {
+    let push = |identities: &mut Vec<String>, value: String| {
         if !value.is_empty() && !identities.contains(&value) {
             identities.push(value);
         }
@@ -70,6 +86,51 @@ fn current_user_identities() -> Vec<String> {
         push(&mut identities, name.to_string_lossy().into_owned());
     }
     identities
+}
+
+/// Redact the account name in paths whose *shape* names a user.
+///
+/// `/home/<name>`, `/media/<name>/<volume>` and `/run/media/<name>/<volume>` put a
+/// username at a fixed position, so it can be stripped without knowing who is
+/// running. That covers the two cases matching against the environment cannot: a
+/// service started with `HOME`, `USER` and `LOGNAME` all unset has no identity to
+/// compare against, and a path naming a *different* account never matched one
+/// anyway.
+fn redact_user_named_parents(text: &str) -> String {
+    let mut parts: Vec<&str> = text.split('/').collect();
+    let mut changed = false;
+
+    let mut index = 0;
+    while index < parts.len() {
+        let name_at = if parts[index] == "home" && index + 1 < parts.len() {
+            // `/home/<name>` is an account directory by definition.
+            Some(index + 1)
+        } else if parts[index] == "media" && index + 2 < parts.len() && !parts[index + 2].is_empty()
+        {
+            // udisks mounts one directory per account, so the volume beneath it is
+            // what distinguishes `/media/<name>/<volume>` from a plain
+            // `/media/cdrom`, which names no one.
+            Some(index + 1)
+        } else {
+            None
+        };
+
+        if let Some(name) = name_at
+            && !parts[name].is_empty()
+            && parts[name] != "$USER"
+        {
+            parts[name] = "$USER";
+            changed = true;
+            index = name;
+        }
+        index += 1;
+    }
+
+    if changed {
+        parts.join("/")
+    } else {
+        text.to_owned()
+    }
 }
 
 /// Redact embedded occurrences of the user's `$HOME`.
@@ -95,7 +156,9 @@ pub fn redact_personal_path(path: &str) -> String {
     for user in current_user_identities() {
         redacted = redact_user_components(&redacted, &user);
     }
-    redacted
+    // Last, and unconditionally: this is the pass that still does something when
+    // the environment names nobody.
+    redact_user_named_parents(&redacted)
 }
 
 #[cfg(test)]
@@ -154,6 +217,63 @@ mod tests {
     fn ambiguous_or_shared_names_are_left_alone() {
         assert_eq!(redact_user_components("/var/root/x", "root"), "/var/root/x");
         assert_eq!(redact_user_components("/a/b/c", "a"), "/a/b/c");
+    }
+
+    /// A generic directory name derived from `HOME` must never be treated as an
+    /// account. `HOME=/home` yields the basename `home`, which previously rewrote
+    /// `/home/alice/data` into `/$USER/alice/data` — redacting the directory and
+    /// leaving the operator's name exposed.
+    #[test]
+    fn generic_directory_names_are_never_treated_as_usernames() {
+        for generic in ["home", "media", "run", "var", "tmp", "usr", "root", "mnt"] {
+            assert_eq!(
+                redact_user_components("/home/alice/data", generic),
+                "/home/alice/data",
+                "{generic:?} must not be redacted as a username"
+            );
+        }
+        assert!(plausible_username("alice"));
+        assert!(!plausible_username("ab"), "too short to match safely");
+    }
+
+    /// The fail-open case: a service with `HOME`, `USER` and `LOGNAME` all unset
+    /// has no identity to match, so the path's own shape has to carry it.
+    #[test]
+    fn user_named_parents_are_redacted_without_any_identity() {
+        assert_eq!(
+            redact_user_named_parents("/run/media/alice/ssd/neuromorphic_data"),
+            "/run/media/$USER/ssd/neuromorphic_data"
+        );
+        assert_eq!(
+            redact_user_named_parents("/media/alice/usb"),
+            "/media/$USER/usb"
+        );
+        assert_eq!(redact_user_named_parents("/home/alice"), "/home/$USER");
+        assert_eq!(
+            redact_user_named_parents("/home/alice/neuromorphic_data/kcd2"),
+            "/home/$USER/neuromorphic_data/kcd2"
+        );
+    }
+
+    /// A mount point that names no account keeps its name.
+    #[test]
+    fn media_mounts_without_a_volume_are_left_alone() {
+        assert_eq!(redact_user_named_parents("/media/cdrom"), "/media/cdrom");
+        assert_eq!(redact_user_named_parents("/mnt/backup"), "/mnt/backup");
+        assert_eq!(
+            redact_user_named_parents("/opt/alicent/data"),
+            "/opt/alicent/data"
+        );
+    }
+
+    #[test]
+    fn structural_redaction_is_idempotent() {
+        let once = redact_user_named_parents("/run/media/alice/ssd");
+        assert_eq!(redact_user_named_parents(&once), once);
+        assert_eq!(
+            redact_user_named_parents("/home/$USER/data"),
+            "/home/$USER/data"
+        );
     }
 
     #[test]
