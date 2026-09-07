@@ -9,9 +9,26 @@ use anyhow::Result;
 use gaming_telemetry::export::{
     CANONICAL_COLUMNS, canonical_frame, resolve_inputs, to_csv, write_csv_atomically,
 };
+use gaming_telemetry::privacy::redact_personal_path;
 use std::path::Path;
+use std::process::ExitCode;
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // Last line of defence. `main() -> Result` would print the chain
+            // verbatim, and the layers underneath are not ours: polars and
+            // `std::io` embed absolute paths in their own messages, so redacting
+            // only the contexts we author is not enough to keep the operator's
+            // identity out of stderr.
+            eprintln!("Error: {}", redact_personal_path(&format!("{error:?}")));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: export_csv <session_dir | parquet_file> [output.csv]");

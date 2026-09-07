@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`export_csv` leaked the operator's absolute path on error.** Redaction covered
+  the contexts this repo writes, but not the errors underneath them: polars embeds
+  the path in its own message (`No such file or directory (os error 2):
+  /home/<user>/…`), and `scan_parquet` is lazy, so a missing or unreadable batch
+  fails at `collect()` — outside every context that had been redacted. The
+  dependency's message is now flattened through the redactor, and the binary
+  redacts the whole error chain at its exit point, so no layer can leak regardless
+  of which one produced the path.
+
 - **CPU telemetry recorded fabricated zeros.** `CpuMonitor` seeded its energy
   counter with `unwrap_or(0)` and fell back to the previous reading on every failed
   read, so when RAPL's `energy_uj` was unreadable — the common case, since it is

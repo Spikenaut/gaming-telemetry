@@ -120,10 +120,15 @@ pub fn canonical_frame(paths: &[PathBuf]) -> Result<DataFrame> {
     let mut frames: Vec<LazyFrame> = Vec::with_capacity(paths.len());
     for path in paths {
         let scanned = LazyFrame::scan_parquet(
-            PlRefPath::try_from_path(path)
-                .with_context(|| format!("not a usable Parquet path: {}", path.display()))?,
+            PlRefPath::try_from_path(path).with_context(|| {
+                format!(
+                    "not a usable Parquet path: {}",
+                    redact_personal_path(&path.display().to_string())
+                )
+            })?,
             ScanArgsParquet::default(),
         )
+        .map_err(redacted)
         .with_context(|| {
             format!(
                 "failed to scan {}",
@@ -136,11 +141,14 @@ pub fn canonical_frame(paths: &[PathBuf]) -> Result<DataFrame> {
     let combined = if frames.len() == 1 {
         frames.remove(0)
     } else {
-        concat(&frames, UnionArgs::default()).context("failed to concatenate session batches")?
+        concat(&frames, UnionArgs::default())
+            .map_err(redacted)
+            .context("failed to concatenate session batches")?
     };
 
     combined
         .collect()
+        .map_err(redacted)
         .context("failed to build the canonical export frame")
 }
 
@@ -167,12 +175,23 @@ pub fn write_csv_atomically(path: &Path, csv: &str) -> Result<()> {
     Ok(())
 }
 
+/// Wrap a foreign error with its operator path stripped.
+///
+/// Our own `.context(...)` strings are redacted at the call site, but the errors
+/// underneath are not ours: polars embeds the absolute path in its own message
+/// (`No such file or directory (os error 2): /home/<user>/…`), so wrapping without
+/// flattening it through the redactor leaks the very thing the contexts hide.
+fn redacted(error: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!(redact_personal_path(&error.to_string()))
+}
+
 /// Render the canonical frame as CSV with a single header row.
 pub fn to_csv(frame: &mut DataFrame) -> Result<String> {
     let mut buffer = Vec::new();
     CsvWriter::new(&mut buffer)
         .include_header(true)
         .finish(frame)
+        .map_err(redacted)
         .context("failed to serialize CSV")?;
     String::from_utf8(buffer).context("CSV output was not valid UTF-8")
 }
@@ -339,6 +358,31 @@ mod tests {
         assert_eq!(csv.lines().count(), 3, "header + two rows");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every error this module raises names a path, and those strings reach logs
+    /// and downstream reports. None may carry the operator's identity.
+    #[test]
+    fn scan_errors_redact_the_operator_path() {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return; // Nothing to redact against; `redact_personal_path` covers this.
+        };
+        let missing = home
+            .join("gt_export_redaction_probe")
+            .join("absent.parquet");
+
+        let error =
+            canonical_frame(std::slice::from_ref(&missing)).expect_err("missing file must fail");
+        let text = format!("{error:?}");
+
+        assert!(
+            !text.contains(home.to_str().unwrap()),
+            "raw home path leaked into an error: {text}"
+        );
+        assert!(
+            text.contains("$HOME"),
+            "expected a redacted marker in: {text}"
+        );
     }
 
     #[test]
