@@ -1,0 +1,25 @@
+CHANGELOG.md
+  ai_agent 11-19
+src/bin/export_csv.rs
+  s_a4c340b7cf9b44::t_b6dbc64721ae67 12,14,16-31
+src/export.rs
+  s_a4c340b7cf9b44::t_cba10270bbf01d 123-128,363-373,376-385
+  s_a4c340b7cf9b44::t_b305e0baded2dd 131,144-146,151,178-187,194
+  s_a4c340b7cf9b44::t_b38d9f3084eecf 374-375
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d98c0235221719f2133f3a202c44a4728f2d997e",
+  "prompts": {},
+  "sessions": {
+    "s_a4c340b7cf9b44": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d459e364-1302-40e2-bf9e-2be98547bb88",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
