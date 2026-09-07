@@ -5,6 +5,15 @@ use duckdb::Connection;
 use gaming_telemetry::privacy::redact_personal_path;
 use std::env;
 
+/// Render an optional temperature at a fixed width so the columns stay aligned
+/// whether or not the sensor was available.
+fn format_celsius(value: Option<f32>) -> String {
+    match value {
+        Some(value) => format!("{value:5.1} C"),
+        None => "  n/a  ".to_owned(),
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -189,13 +198,20 @@ fn main() -> Result<()> {
     while let Some(row) = rows.next()? {
         found = true;
         let ts: i64 = row.get(0)?;
+        // `cpu_tctl_c` cannot be NULL here: the `> 80.0` filter excludes NULL rows.
+        // The CCD sensors are unfiltered and absent on single-CCD parts, so reading
+        // them as `f32` aborts the whole query on the first spike.
         let tctl: f32 = row.get(1)?;
-        let ccd1: f32 = row.get(2)?;
-        let ccd2: f32 = row.get(3)?;
+        let ccd1: Option<f32> = row.get(2)?;
+        let ccd2: Option<f32> = row.get(3)?;
         let pwr: u32 = row.get(4)?;
         println!(
-            "TS: {} | Tctl: {:5.1} C | CCD1: {:5.1} C | CCD2: {:5.1} C | Power: {:5} mW",
-            ts, tctl, ccd1, ccd2, pwr
+            "TS: {} | Tctl: {:5.1} C | CCD1: {} | CCD2: {} | Power: {:5} mW",
+            ts,
+            tctl,
+            format_celsius(ccd1),
+            format_celsius(ccd2),
+            pwr
         );
     }
     if !found {

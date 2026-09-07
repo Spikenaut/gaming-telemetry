@@ -38,6 +38,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   column empty for a whole session with no notice.
 - An unreadable `max_energy_range_uj` is now reported at startup: without it a wrap
   cannot be resolved, so power goes empty from the first wrap onward.
+- `query`'s CPU-spike listing read `cpu_ccd1_c`/`cpu_ccd2_c` as `f32`. Those
+  columns are unfiltered by the `Tctl > 80` predicate and absent on single-CCD
+  parts, so the first thermal spike aborted the whole command. They are read as
+  nullable and rendered `n/a`.
 - `query` reports unavailable CPU aggregates instead of failing. With nullable
   columns, `avg`/`max` over an all-null column return NULL, which the `f64`
   accessor rejected.
