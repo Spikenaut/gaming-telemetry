@@ -317,6 +317,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `export_csv` prints with `print!`, not `println!`. That is only correct if
+    /// the writer already terminates the final record — otherwise piped output
+    /// loses its last newline.
+    #[test]
+    fn csv_output_is_newline_terminated() {
+        let dir = fixture_dir("trailing_newline");
+        write_batch(&dir, 1, &[10, 20], "kcd2");
+
+        let mut df = canonical_frame(&batch_files_in(&dir).unwrap()).unwrap();
+        let csv = to_csv(&mut df).unwrap();
+        assert!(
+            csv.ends_with('\n'),
+            "writer must terminate the last record; got {:?}",
+            &csv[csv.len().saturating_sub(20)..]
+        );
+        assert!(
+            !csv.ends_with("\n\n"),
+            "exactly one terminator, so `print!` does not add a blank line"
+        );
+        assert_eq!(csv.lines().count(), 3, "header + two rows");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_directory_without_batches_is_an_error() {
         let dir = fixture_dir("empty");
