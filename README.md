@@ -180,16 +180,36 @@ Header:
 - `gpu_power_w` is `power_usage_mw / 1000.0` — the only unit conversion.
 - `session_label` is appended **last**, so a consumer reading the original five
   columns positionally keeps working while multi-title captures become separable.
-- `cpu_tctl_c` and `cpu_package_power_w` are empty when the sensor was
-  unavailable — see [CPU sensor availability](#cpu-sensor-availability).
+- `cpu_tctl_c` and `cpu_package_power_w` are empty when no valid measurement was
+  obtained for that sample — see [CPU sensor availability](#cpu-sensor-availability).
 - Batches are ordered numerically, so `batch_10` follows `batch_2`. A shell glob
   would order them lexically and silently scramble the time series.
 
 ## CPU sensor availability
 
 The four CPU columns (`cpu_tctl_c`, `cpu_ccd1_c`, `cpu_ccd2_c`,
-`cpu_package_power_w`) are **nullable**. A null means the sensor could not be
-read; it never means the CPU measured zero.
+`cpu_package_power_w`) are **nullable**. A null means *no valid measurement was
+obtained for that sample*. It never means the CPU measured zero.
+
+For the temperatures, that is always a read that did not succeed: no k10temp
+device, an input the SKU does not have (CCD sensors are absent on some parts), or
+an unreadable file.
+
+`cpu_package_power_w` is a **derived** value — the difference between two energy
+counter readings over the interval between them — so it is null in more cases than
+"sensor missing":
+
+| Null because | When |
+|---|---|
+| No readable RAPL counter | `energy_uj` absent or permission-denied (see below) |
+| A single failed read | that tick's counter read did not succeed |
+| **No previous reading** | the **first** poll of a run — a delta needs two samples |
+| Wrap with no ceiling | the counter went backwards and `max_energy_range_uj` is unreadable |
+| Reading out of range | either counter value exceeds `max_energy_range_uj` |
+| Unusable interval | elapsed time was not positive and finite |
+
+So expect exactly one null at the start of every session even on a fully working
+machine, and treat a null as "unknown for this sample", not "sensor absent".
 
 This matters most for package power. Since
 [CVE-2020-8694](https://nvd.nist.gov/vuln/detail/CVE-2020-8694), RAPL's
