@@ -20,22 +20,38 @@ jobs:
           components: rustfmt
           toolchain: "1.98.0"
       - name: MSRV pin matches Cargo.toml
-        # The toolchain version is repeated in every job below and in
-        # rust-toolchain.toml. Fail loudly when they drift apart.
+        # The toolchain version is repeated in Cargo.toml, rust-toolchain.toml and
+        # every job below. Fail loudly when they drift apart. Parsed with sed
+        # rather than `grep -oP`, which needs a PCRE-enabled grep.
         run: |
-          declared=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
-          pinned=$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)
-          echo "Cargo.toml rust-version=$declared  rust-toolchain.toml channel=$pinned"
+          set -euo pipefail
+          declared=$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -1)
+          pinned=$(sed -nE 's/^channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml | head -1)
+          echo "Cargo.toml rust-version=${declared:-<none>}  rust-toolchain.toml channel=${pinned:-<none>}"
+
+          # Fail closed: an unreadable value means the guard cannot do its job,
+          # which must not read as success.
+          test -n "$declared" || { echo "::error::no rust-version in Cargo.toml"; exit 1; }
+          test -n "$pinned"   || { echo "::error::no channel in rust-toolchain.toml"; exit 1; }
           test "$declared" = "$pinned" || {
             echo "::error::MSRV drift: Cargo.toml says $declared, rust-toolchain.toml says $pinned"
             exit 1
           }
-          for job_pin in $(grep -oP 'toolchain: "\K[0-9.]+' .github/workflows/ci.yml | sort -u); do
+
+          # Every job pin, whatever its form -- a job switched to "stable" must be
+          # caught, not skipped by a numeric-only pattern.
+          pins=$(sed -nE 's/^[[:space:]]*toolchain:[[:space:]]*"([^"]+)".*/\1/p' .github/workflows/ci.yml | sort -u)
+          test -n "$pins" || {
+            echo "::error::found no toolchain: pins to check -- the guard would pass vacuously"
+            exit 1
+          }
+          for job_pin in $pins; do
             test "$job_pin" = "$declared" || {
-              echo "::error::CI job pins $job_pin but Cargo.toml declares $declared"
+              echo "::error::a CI job pins \"$job_pin\" but Cargo.toml declares $declared"
               exit 1
             }
           done
+          echo "All toolchain pins agree on $declared."
       - name: rustfmt
         run: cargo fmt --all -- --check
 
